@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Azure FreeIPA Sync daily
+Requires=azure-freeipa-sync.service
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

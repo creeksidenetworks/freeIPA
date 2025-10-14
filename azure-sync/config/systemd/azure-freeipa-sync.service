@@ -1,0 +1,23 @@
+[Unit]
+Description=Azure Entra ID to FreeIPA Sync Service
+After=network.target freeipa.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/freeipa-sync/azure_freeipa_sync.py -c /etc/azure_sync.conf
+WorkingDirectory=/opt/freeipa-sync
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log /var/backups /tmp
+
+[Install]
+WantedBy=multi-user.target
