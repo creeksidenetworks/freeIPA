@@ -66,13 +66,25 @@ Usage: $0 -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>]
 Arguments:
   -h <fqdn>        IPA FQDN (e.g., ipa.example.com)
   -r              Replica mode (default is standalone)
-  -d <password>   Directory Manager password (random if not provided)
-  -p <password>   Admin password (random if not provided)
+  -d <password>   Directory Manager password (random if not provided for standalone)
+  -p <password>   Admin password (required for replica, random if not provided for standalone)
   -?              Show this help
 
 Examples:
+  # Standalone server (first IPA server)
   $0 -h ipa.example.com
-  $0 -h ipa2.example.com -r -d MyDMPass123 -p MyAdminPass123
+
+  # Replica server (requires existing IPA domain)
+  $0 -h ipa2.example.com -r -p AdminPassword123
+
+  # Standalone with custom passwords
+  $0 -h ipa.example.com -d MyDMPass123 -p MyAdminPass123
+
+Note for Replica Mode:
+  - The server will first join the existing IPA domain as a client
+  - Then it will be promoted to a replica server
+  - Admin password is required to join the domain
+  - Ensure DNS can resolve the primary IPA server
 EOF
 }
 
@@ -216,9 +228,20 @@ install_replica_server() {
     log "Domain: $IPA_DOMAIN"
     log "IP: $primary_ip"
     
+    # Check if already enrolled as client
+    local already_client=false
+    if [[ -f "/etc/ipa/default.conf" ]]; then
+        log "Existing FreeIPA client configuration detected"
+        already_client=true
+    fi
+    
     # Install required packages
-    local packages=(
-        "ipa-server" "ipa-server-dns" "freeipa-server-trust-ad" 
+    local packages=()
+    if [[ "$already_client" == false ]]; then
+        packages+=("ipa-client")
+    fi
+    packages+=(
+        "ipa-server" "ipa-server-dns" "freeipa-server-trust-ad"
         "freeradius" "freeradius-ldap" "freeradius-krb5" "freeradius-utils"
     )
     install_packages "${packages[@]}"
@@ -227,7 +250,118 @@ install_replica_server() {
     configure_hostname "$hostname" "$IPA_DOMAIN" "$primary_ip"
     configure_firewall
     
-    log "Starting FreeIPA replica installation..."
+    # Step 1: Join as client if not already joined
+    if [[ "$already_client" == false ]]; then
+        join_ipa_domain
+    fi
+    
+    # Step 2: Promote to replica server
+    promote_to_replica
+    
+    log "FreeIPA replica server installation completed successfully"
+}
+
+join_ipa_domain() {
+    log "Joining FreeIPA domain as client..."
+    
+    # Try to discover the primary server
+    local primary_server
+    primary_server=$(dig +short _ldap._tcp."$IPA_DOMAIN" SRV | head -1 | awk '{print $4}' | sed 's/\.$//')
+    
+    if [[ -z "$primary_server" ]]; then
+        log "Could not auto-discover primary server, prompting for manual input"
+        read -p "Enter the FQDN of the primary FreeIPA server: " primary_server
+        [[ -z "$primary_server" ]] && error_exit "Primary server FQDN is required"
+    fi
+    
+    log "Primary FreeIPA server: $primary_server"
+    
+    # Get admin credentials for joining
+    local admin_user="admin"
+    local admin_password
+    
+    if [[ -n "$ADMIN_PASSWORD" ]]; then
+        admin_password="$ADMIN_PASSWORD"
+        log "Using provided admin password for domain join"
+    else
+        read -s -p "Enter the admin password for domain join: " admin_password
+        echo
+        [[ -z "$admin_password" ]] && error_exit "Admin password is required"
+    fi
+    
+    # Join the domain
+    log "Joining domain $IPA_DOMAIN..."
+    ipa-client-install \
+        --server="$primary_server" \
+        --domain="$IPA_DOMAIN" \
+        --realm="$IPA_REALM" \
+        --hostname="$IPA_FQDN" \
+        --principal="$admin_user" \
+        --password="$admin_password" \
+        --mkhomedir \
+        --unattended || error_exit "Failed to join FreeIPA domain"
+    
+    log "Successfully joined FreeIPA domain"
+    
+    # Verify we can get Kerberos ticket
+    echo "$admin_password" | kinit "$admin_user" || error_exit "Failed to get Kerberos ticket"
+    log "Kerberos authentication successful"
+    
+    # Add host to ipaservers group (REQUIRED for replica promotion)
+    log "Adding host to ipaservers group (required for replica)..."
+    
+    # First check if already member
+    if ipa hostgroup-show ipaservers --hosts | grep -q "$IPA_FQDN"; then
+        log "Host is already a member of ipaservers group"
+    else
+        log "Adding $IPA_FQDN to ipaservers hostgroup..."
+        if ipa hostgroup-add-member ipaservers --hosts="$IPA_FQDN"; then
+            log "Successfully added host to ipaservers group"
+        else
+            error_exit "CRITICAL: Failed to add host to ipaservers group. This is required for replica installation.
+    
+Manual fix: Run the following command on the primary server:
+    ipa hostgroup-add-member ipaservers --hosts=$IPA_FQDN
+    
+Then re-run this script."
+        fi
+    fi
+    
+    # Verify membership
+    log "Verifying ipaservers group membership..."
+    if ipa hostgroup-show ipaservers --hosts | grep -q "$IPA_FQDN"; then
+        log "✓ Host is confirmed as member of ipaservers group"
+    else
+        error_exit "Host is not a member of ipaservers group. Cannot proceed with replica installation."
+    fi
+}
+
+promote_to_replica() {
+    log "Promoting client to replica server..."
+    
+    # Pre-promotion verification: Check ipaservers group membership
+    log "Pre-promotion check: Verifying ipaservers group membership..."
+    if ! ipa hostgroup-show ipaservers --hosts 2>/dev/null | grep -q "$IPA_FQDN"; then
+        error_exit "CRITICAL: Host $IPA_FQDN is not a member of ipaservers group. 
+Replica promotion will fail. Please add the host to ipaservers group first:
+    ipa hostgroup-add-member ipaservers --hosts=$IPA_FQDN"
+    fi
+    log "✓ Pre-promotion check passed: Host is member of ipaservers group"
+    
+    # Ensure we have valid Kerberos ticket
+    if ! klist -s 2>/dev/null; then
+        log "No valid Kerberos ticket found, attempting to get one"
+        local admin_password
+        if [[ -n "$ADMIN_PASSWORD" ]]; then
+            admin_password="$ADMIN_PASSWORD"
+        else
+            read -s -p "Enter the admin password: " admin_password
+            echo
+        fi
+        echo "$admin_password" | kinit admin || error_exit "Failed to get Kerberos ticket for replica promotion"
+    fi
+    
+    log "Starting replica promotion..."
     ipa-replica-install \
         --setup-adtrust \
         --setup-ca \
@@ -236,9 +370,9 @@ install_replica_server() {
         --allow-zone-overlap \
         --auto-reverse \
         --auto-forwarders \
-        --unattended || error_exit "FreeIPA replica installation failed"
+        --unattended || error_exit "FreeIPA replica promotion failed"
     
-    log "FreeIPA replica server installation completed successfully"
+    log "Replica promotion completed successfully"
 }
 
 # --- FreeRADIUS Configuration ---
@@ -418,13 +552,22 @@ parse_arguments() {
     
     # Generate passwords if not provided
     if [[ -z "$DM_PASSWORD" ]]; then
-        DM_PASSWORD=$(generate_password)
-        log "Generated Directory Manager password: $DM_PASSWORD"
+        if [[ "$REPLICA_MODE" = true ]]; then
+            log "Replica mode: Directory Manager password not required for replica installation"
+        else
+            DM_PASSWORD=$(generate_password)
+            log "Generated Directory Manager password: $DM_PASSWORD"
+        fi
     fi
     
     if [[ -z "$ADMIN_PASSWORD" ]]; then
-        ADMIN_PASSWORD=$(generate_password)
-        log "Generated Admin password: $ADMIN_PASSWORD"
+        if [[ "$REPLICA_MODE" = true ]]; then
+            log "WARNING: Replica mode requires admin password to join domain"
+            log "You will be prompted for the admin password during installation"
+        else
+            ADMIN_PASSWORD=$(generate_password)
+            log "Generated Admin password: $ADMIN_PASSWORD"
+        fi
     fi
     
     # Generate RADIUS secret

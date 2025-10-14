@@ -28,8 +28,8 @@ chmod +x install-ipa.sh
 # Install standalone FreeIPA server
 sudo ./install-ipa.sh -h ipa.example.com
 
-# Install replica server
-sudo ./install-ipa.sh -h ipa2.example.com -r
+# Install replica server (with admin password recommended)
+sudo ./install-ipa.sh -h ipa2.example.com -r -p AdminPassword123
 
 # Install with custom passwords
 sudo ./install-ipa.sh -h ipa.example.com -d MyDMPassword123 -p MyAdminPassword123
@@ -54,10 +54,19 @@ sudo ./install-ipa.sh -h ipa.example.com -d MyDMPassword123 -p MyAdminPassword12
 - Group membership in RADIUS replies
 
 ### Replica Mode
-- FreeIPA replica server
-- DNS and CA replication
-- AD trust support
-- FreeRADIUS (basic installation)
+The replica installation process:
+
+1. **Domain Join**: Server first joins existing FreeIPA domain as client
+2. **Host Preparation**: Added to `ipaservers` group automatically
+3. **Replica Promotion**: Client promoted to full replica server
+4. **Services Setup**: DNS, CA replication, and AD trust configured
+5. **FreeRADIUS**: Basic installation (not configured by default on replicas)
+
+**Requirements for Replica:**
+- Existing FreeIPA domain must be accessible
+- Admin credentials for domain join
+- DNS resolution to primary server
+- Network connectivity to existing IPA servers
 
 ## Post-Installation
 
