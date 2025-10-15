@@ -383,20 +383,19 @@ configure_freeradius() {
     # Generate random RADIUS secret if not provided
     [[ -z "$RADIUS_SECRET" ]] && RADIUS_SECRET=$(generate_password)
     
-    # Create configuration directories
-    mkdir -p /etc/creekside/radius
-    
     # Configure LDAP module
     configure_radius_ldap
-    
-    # Configure EAP module for MS-CHAPv2
-    configure_radius_eap
     
     # Configure clients
     configure_radius_clients
     
-    # Configure default site
+    # Configure default site with group support
     configure_radius_site
+    
+    # Add memberOf to dictionary if not present
+    if ! grep -q "memberOf" /etc/raddb/dictionary; then
+        echo -e "ATTRIBUTE\tmemberOf\t\t3101\tstring" >> /etc/raddb/dictionary
+    fi
     
     # Generate certificates
     log "Generating RADIUS certificates..."
@@ -416,51 +415,179 @@ configure_radius_ldap() {
 
     log "Configuring FreeRADIUS LDAP module..."
 
-    # Update LDAP configuration
-    sed -i "s/server = 'localhost'/server = '127.0.0.1'/" "$ldap_config"
-    sed -i "s/base_dn = 'dc=example,dc=org'/base_dn = '$base_dn'/" "$ldap_config"
+    # Backup original LDAP config
+    [[ ! -f "${ldap_config}.orig" ]] && cp "$ldap_config" "${ldap_config}.orig"
 
-    # Remove any commented identity/password lines
-    sed -i "/^#\s*identity\s*=\s*'/d" "$ldap_config"
-    sed -i "/^#\s*password\s*=\s*'/d" "$ldap_config"
-    # Remove any existing identity/password lines
-    sed -i "/^identity\s*=\s*'/d" "$ldap_config"
-    sed -i "/^password\s*=\s*'/d" "$ldap_config"
-    # Insert correct identity and password after server line
-    sed -i "/^server =/a identity = 'cn=Directory Manager'\npassword = '$DM_PASSWORD'" "$ldap_config"
+    # Generate complete LDAP configuration file
+    cat > "$ldap_config" << 'LDAPEOF'
+# -*- text -*-
+#
+#  FreeRADIUS LDAP module configuration for FreeIPA
+#
 
-    # Configure NT-Password attribute for MS-CHAPv2
-    sed -i '/control:NT-Password/c\t\tcontrol:NT-Password\t\t:= '\''ipaNTHash'\''' "$ldap_config"
+ldap {
+    server = '127.0.0.1'
+    port = 389
+    
+    identity = 'cn=Directory Manager'
+LDAPEOF
 
-    # Add memberOf support
-    sed -i '/reply:Tunnel-Private-Group-ID/c\t\treply:memberOf\t\t\t+= '\''memberOf'\''' "$ldap_config"
-
-    # Ensure LDAP module is enabled
-    ln -sf /etc/raddb/mods-available/ldap /etc/raddb/mods-enabled/ldap
+    # Add password (with variable expansion)
+    echo "    password = '$DM_PASSWORD'" >> "$ldap_config"
+    
+    # Continue with rest of config
+    cat >> "$ldap_config" << LDAPEOF2
+    
+    base_dn = '$base_dn'
+    
+    sasl {
+    }
+    
+    update {
+        control:Password-With-Header    += 'userPassword'
+        control:NT-Password             := 'ipaNTHash'
+        reply:memberOf                  += 'memberOf'
+        
+        control:                        += 'radiusControlAttribute'
+        request:                        += 'radiusRequestAttribute'
+        reply:                          += 'radiusReplyAttribute'
+    }
+    
+    user_dn = "LDAP-UserDn"
+    
+    user {
+        base_dn = "\${..base_dn}"
+        filter = "(uid=%{%{Stripped-User-Name}:-%{User-Name}})"
+        
+        sasl {
+        }
+        
+        scope = 'sub'
+    }
+    
+    group {
+        base_dn = "\${..base_dn}"
+        filter = '(objectClass=posixGroup)'
+        scope = 'sub'
+        name_attribute = cn
+        membership_attribute = 'memberOf'
+        cacheable_name = 'no'
+        cacheable_dn = 'no'
+    }
+    
+    profile {
+    }
+    
+    client {
+        base_dn = "\${..base_dn}"
+        filter = '(objectClass=radiusClient)'
+        
+        template {
+        }
+        
+        attribute {
+            ipaddr              = 'radiusClientIdentifier'
+            secret              = 'radiusClientSecret'
+        }
+    }
+    
+    accounting {
+        reference = "%{tolower:type.%{Acct-Status-Type}}"
+        
+        type {
+            start {
+                update {
+                    description := "Online at %S"
+                }
+            }
+            
+            interim-update {
+                update {
+                    description := "Last seen at %S"
+                }
+            }
+            
+            stop {
+                update {
+                    description := "Offline at %S"
+                }
+            }
+        }
+    }
+    
+    post-auth {
+        update {
+            description := "Authenticated at %S"
+        }
+    }
+    
+    options {
+        chase_referrals = yes
+        rebind = yes
+        res_timeout = 10
+        srv_timelimit = 3
+        net_timeout = 1
+        idle = 60
+        probes = 3
+        interval = 3
+        ldap_debug = 0x0028
+    }
+    
+    tls {
+    }
+    
+    pool {
+        start = \${thread[pool].start_servers}
+        min = \${thread[pool].min_spare_servers}
+        max = \${thread[pool].max_servers}
+        spare = \${thread[pool].max_spare_servers}
+        uses = 0
+        retry_delay = 30
+        lifetime = 0
+        idle_timeout = 60
+    }
 }
+LDAPEOF2
 
-configure_radius_eap() {
-    local eap_config="/etc/creekside/radius/mods-eap.conf"
+    # Enable LDAP module
+    ln -sf /etc/raddb/mods-available/ldap /etc/raddb/mods-enabled/ldap
     
-    log "Configuring FreeRADIUS EAP module..."
-    
-    # Copy and modify EAP configuration
-    cp /etc/raddb/mods-available/eap "$eap_config"
-    
-    # Set default EAP type to MS-CHAPv2
-    sed -i 's/default_eap_type = md5/default_eap_type = mschapv2/' "$eap_config"
-    
-    # Link to FreeRADIUS
-    ln -sf "$eap_config" /etc/raddb/mods-enabled/eap
+    log "LDAP module configured successfully"
 }
 
 configure_radius_clients() {
-    local clients_config="/etc/creekside/radius/radius-clients.conf"
+    local clients_config="/etc/raddb/clients.conf"
     
     log "Configuring FreeRADIUS clients..."
     
+    # Backup original clients config
+    [[ ! -f "${clients_config}.orig" ]] && cp "$clients_config" "${clients_config}.orig"
+    
+    # Generate complete clients configuration file
     cat > "$clients_config" << EOF
-# FreeRADIUS clients configuration
+# -*- text -*-
+#
+# FreeRADIUS clients configuration for FreeIPA
+#
+
+client localhost {
+    ipaddr = 127.0.0.1
+    proto = *
+    secret = $RADIUS_SECRET
+    require_message_authenticator = no
+    nas_type = other
+    limit {
+        max_connections = 16
+        lifetime = 0
+        idle_timeout = 30
+    }
+}
+
+client localhost_ipv6 {
+    ipv6addr = ::1
+    secret = $RADIUS_SECRET
+}
+
 client localnet {
     ipaddr = 0.0.0.0/0
     proto = *
@@ -472,43 +599,163 @@ client localnet {
         idle_timeout = 30
     }
 }
-
-client localhost {
-    ipaddr = 127.0.0.1
-    proto = *
-    secret = $RADIUS_SECRET
-    nas_type = other
-    limit {
-        max_connections = 16
-        lifetime = 0
-        idle_timeout = 30
-    }
-}
 EOF
     
-    # Backup original and link new config
-    [[ ! -f /etc/raddb/clients.conf.orig ]] && cp /etc/raddb/clients.conf /etc/raddb/clients.conf.orig
-    ln -sf "$clients_config" /etc/raddb/clients.conf
+    log "Clients configuration generated successfully"
 }
 
 configure_radius_site() {
-    local site_config="/etc/creekside/radius/radius-default.cfg"
+    local site_config="/etc/raddb/sites-available/default"
     
     log "Configuring FreeRADIUS default site..."
     
-    # Copy and modify default site
-    cp /etc/raddb/sites-available/default "$site_config"
+    # Backup original site config
+    [[ ! -f "${site_config}.orig" ]] && cp "$site_config" "${site_config}.orig"
     
-    # Add group membership to reply
-    sed -i 's/post-auth {/post-auth {\n\tforeach \&reply:memberOf {\n\t\tif ("%{Foreach-Variable-0}" =~ \/cn=groups\/i) {\n\t\t\tif ("%{Foreach-Variable-0}" =~ \/cn=([^,=]+)\/i) {\n\t\t\t\tupdate reply {\n\t\t\t\t\tClass += "%{1}"\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}/' "$site_config"
+    # Generate complete default site configuration
+    cat > "$site_config" << 'SITEEOF'
+# -*- text -*-
+#
+# FreeRADIUS default virtual server for FreeIPA
+#
+
+server default {
+
+listen {
+	type = auth
+	ipaddr = *
+	port = 0
+	limit {
+		max_connections = 16
+		lifetime = 0
+		idle_timeout = 30
+	}
+}
+
+listen {
+	ipaddr = *
+	port = 0
+	type = acct
+	limit {
+	}
+}
+
+listen {
+	type = auth
+	ipv6addr = ::
+	port = 0
+	limit {
+		max_connections = 16
+		lifetime = 0
+		idle_timeout = 30
+	}
+}
+
+listen {
+	ipv6addr = ::
+	port = 0
+	type = acct
+	limit {
+	}
+}
+
+authorize {
+	filter_username
+	preprocess
+	chap
+	mschap
+	digest
+	suffix
+	eap {
+		ok = return
+	}
+	files
+	-sql
+	-ldap
+	ldap
+	expiration
+	logintime
+	pap
+}
+
+authenticate {
+	Auth-Type PAP {
+		pap
+	}
+	Auth-Type CHAP {
+		chap
+	}
+	Auth-Type MS-CHAP {
+		mschap
+	}
+	mschap
+	digest
+	eap
+}
+
+preacct {
+	preprocess
+	acct_unique
+	suffix
+	files
+}
+
+accounting {
+	detail
+	unix
+	-sql
+	exec
+	attr_filter.accounting_response
+}
+
+session {
+}
+
+post-auth {
+	update {
+		&reply: += &session-state:
+	}
+	
+	# Process group membership from LDAP memberOf attribute
+	foreach &reply:memberOf {
+		if ("%{Foreach-Variable-0}" =~ /cn=groups/i) {
+			if ("%{Foreach-Variable-0}" =~ /cn=([^,=]+)/i) {
+				update reply {
+					Class += "%{1}"
+				}
+			}
+		}
+	}
+	
+	-sql
+	exec
+	remove_reply_message_if_eap
+	
+	Post-Auth-Type REJECT {
+		-sql
+		attr_filter.access_reject
+		eap
+		remove_reply_message_if_eap
+	}
+	
+	Post-Auth-Type Challenge {
+	}
+}
+
+pre-proxy {
+}
+
+post-proxy {
+	eap
+}
+
+}
+SITEEOF
+
+    # Enable the default site
+    ln -sf /etc/raddb/sites-available/default /etc/raddb/sites-enabled/default
     
-    # Link to FreeRADIUS
-    ln -sf "$site_config" /etc/raddb/sites-enabled/default
-    
-    # Add memberOf to dictionary if not present
-    if ! grep -q "memberOf" /etc/raddb/dictionary; then
-        echo -e "ATTRIBUTE\tmemberOf\t\t3101\tstring" >> /etc/raddb/dictionary
-    fi
+    log "Default site configured successfully with group membership support"
 }
 
 # --- Argument Parsing ---
