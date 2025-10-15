@@ -446,11 +446,12 @@ LDAPEOF
     update {
         control:Password-With-Header    += 'userPassword'
         control:NT-Password             := 'ipaNTHash'
-        reply:memberOf                  += 'memberOf'
+        control:LDAP-Group              += 'memberOf'
         
         control:                        += 'radiusControlAttribute'
         request:                        += 'radiusRequestAttribute'
         reply:                          += 'radiusReplyAttribute'
+		reply:memberOf                  += 'memberOf'
     }
     
     user_dn = "LDAP-UserDn"
@@ -717,6 +718,7 @@ post-auth {
 	}
 	
 	# Process group membership from LDAP memberOf attribute
+	# Extract group names and add to reply
 	foreach &reply:memberOf {
 		if ("%{Foreach-Variable-0}" =~ /cn=groups/i) {
 			if ("%{Foreach-Variable-0}" =~ /cn=([^,=]+)/i) {
@@ -841,6 +843,29 @@ show_configuration_summary() {
 }
 
 save_passwords() {
+    local secrets_file="/etc/ipa/secrets"
+    
+    # Create /etc/ipa directory if it doesn't exist
+    mkdir -p /etc/ipa
+    
+    # Save secrets to /etc/ipa/secrets
+    cat > "$secrets_file" << EOF
+# FreeIPA Installation Secrets
+# Generated on: $(date)
+# FQDN: $IPA_FQDN
+# Domain: $IPA_DOMAIN
+# Realm: $IPA_REALM
+
+Directory Manager Password: $DM_PASSWORD
+Admin Password: $ADMIN_PASSWORD
+RADIUS Client Secret: $RADIUS_SECRET
+
+Log file: $LOG_FILE
+EOF
+    chmod 600 "$secrets_file"
+    log "Secrets saved to: $secrets_file"
+    
+    # Also save to log file location for backwards compatibility
     cat > "$LOG_FILE.passwords" << EOF
 FreeIPA Installation Passwords
 Generated on: $(date)
@@ -855,7 +880,7 @@ RADIUS Client Secret: $RADIUS_SECRET
 Log file: $LOG_FILE
 EOF
     chmod 600 "$LOG_FILE.passwords"
-    log "Passwords saved to: $LOG_FILE.passwords"
+    log "Passwords also saved to: $LOG_FILE.passwords"
 }
 
 # --- Main Function ---
@@ -901,7 +926,8 @@ main() {
         log "FreeRADIUS is configured and running"
         log "RADIUS client secret: $RADIUS_SECRET"
     fi
-    log "All passwords saved to: $LOG_FILE.passwords"
+    log "All secrets saved to: /etc/ipa/secrets"
+    log "Installation log: $LOG_FILE"
 }
 
 # Execute main function with all arguments
