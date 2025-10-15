@@ -27,7 +27,7 @@ set -e
 
 # Global variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="/tmp/install-ipa-$(date +%Y%m%d-%H%M%S).log"
+LOG_FILE="/var/log/install-ipa.log"
 IPA_FQDN=""
 IPA_DOMAIN=""
 IPA_REALM=""
@@ -235,7 +235,7 @@ install_replica_server() {
         already_client=true
     fi
     
-    # Install required packages
+    # Install required packages (including FreeRADIUS)
     local packages=()
     if [[ "$already_client" == false ]]; then
         packages+=("ipa-client")
@@ -245,19 +245,22 @@ install_replica_server() {
         "freeradius" "freeradius-ldap" "freeradius-krb5" "freeradius-utils"
     )
     install_packages "${packages[@]}"
-    
+
     # Configure hostname and firewall
     configure_hostname "$hostname" "$IPA_DOMAIN" "$primary_ip"
     configure_firewall
-    
+
     # Step 1: Join as client if not already joined
     if [[ "$already_client" == false ]]; then
         join_ipa_domain
     fi
-    
+
     # Step 2: Promote to replica server
     promote_to_replica
-    
+
+    # Step 3: Configure FreeRADIUS (same as standalone)
+    configure_freeradius
+
     log "FreeIPA replica server installation completed successfully"
 }
 
@@ -411,50 +414,52 @@ configure_freeradius() {
 }
 
 configure_radius_ldap() {
-    local ldap_config="/etc/creekside/radius/radius-ldap.cfg"
+    local ldap_config="/etc/raddb/mods-available/ldap"
     local base_dn="cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
     
     log "Configuring FreeRADIUS LDAP module..."
     
     # Copy and modify LDAP configuration
-    cp /etc/raddb/mods-available/ldap "$ldap_config"
+    # No need to copy, we edit the default file directly
     
     # Update LDAP configuration
     sed -i "s/server = 'localhost'/server = '127.0.0.1'/" "$ldap_config"
-    sed -i "s/identity = 'cn=admin,dc=example,dc=org'/identity = 'cn=Directory Manager'/" "$ldap_config"
-    sed -i "s/password = mypass/password = '$DM_PASSWORD'/" "$ldap_config"
     sed -i "s/base_dn = 'dc=example,dc=org'/base_dn = '$base_dn'/" "$ldap_config"
-    
+
+    # Ensure identity and password lines are uncommented and set
+    # Remove any commented identity/password lines
+    sed -i "/^#\s*identity\s*=\s*'/d" "$ldap_config"
+    sed -i "/^#\s*password\s*=\s*'/d" "$ldap_config"
+    # Remove any existing identity/password lines
+    sed -i "/^identity\s*=\s*'/d" "$ldap_config"
+    sed -i "/^password\s*=\s*'/d" "$ldap_config"
+    # Insert correct identity and password after server line
+    sed -i "/^server =/a identity = 'cn=Directory Manager'\npassword = '$DM_PASSWORD'" "$ldap_config"
+
     # Configure NT-Password attribute for MS-CHAPv2
     sed -i '/control:NT-Password/c\\t\tcontrol:NT-Password\t\t:= '\''ipaNTHash'\''' "$ldap_config"
-    
+
     # Add memberOf support
     sed -i '/reply:Tunnel-Private-Group-ID/c\\t\treply:memberOf\t\t\t+= '\''memberOf'\''' "$ldap_config"
-    
-    # Link to FreeRADIUS
-    ln -sf "$ldap_config" /etc/raddb/mods-enabled/ldap
+
+    # Ensure LDAP module is enabled
+    ln -sf /etc/raddb/mods-available/ldap /etc/raddb/mods-enabled/ldap
 }
 
 configure_radius_eap() {
-    local eap_config="/etc/creekside/radius/mods-eap.conf"
-    
+    local eap_config="/etc/raddb/mods-available/eap"
     log "Configuring FreeRADIUS EAP module..."
-    
-    # Copy and modify EAP configuration
-    cp /etc/raddb/mods-available/eap "$eap_config"
-    
     # Set default EAP type to MS-CHAPv2
     sed -i 's/default_eap_type = md5/default_eap_type = mschapv2/' "$eap_config"
-    
-    # Link to FreeRADIUS
-    ln -sf "$eap_config" /etc/raddb/mods-enabled/eap
+    # Ensure EAP module is enabled
+    ln -sf /etc/raddb/mods-available/eap /etc/raddb/mods-enabled/eap
 }
 
 configure_radius_clients() {
-    local clients_config="/etc/creekside/radius/radius-clients.conf"
-    
+    local clients_config="/etc/raddb/clients.conf"
     log "Configuring FreeRADIUS clients..."
-    
+    # Backup original
+    [[ ! -f /etc/raddb/clients.conf.orig ]] && cp /etc/raddb/clients.conf /etc/raddb/clients.conf.orig
     cat > "$clients_config" << EOF
 # FreeRADIUS clients configuration
 client localnet {
@@ -481,26 +486,15 @@ client localhost {
     }
 }
 EOF
-    
-    # Backup original and link new config
-    [[ ! -f /etc/raddb/clients.conf.orig ]] && cp /etc/raddb/clients.conf /etc/raddb/clients.conf.orig
-    ln -sf "$clients_config" /etc/raddb/clients.conf
 }
 
 configure_radius_site() {
-    local site_config="/etc/creekside/radius/radius-default.cfg"
-    
+    local site_config="/etc/raddb/sites-available/default"
     log "Configuring FreeRADIUS default site..."
-    
-    # Copy and modify default site
-    cp /etc/raddb/sites-available/default "$site_config"
-    
     # Add group membership to reply
     sed -i 's/post-auth {/post-auth {\n\tforeach \&reply:memberOf {\n\t\tif ("%{Foreach-Variable-0}" =~ \/cn=groups\/i) {\n\t\t\tif ("%{Foreach-Variable-0}" =~ \/cn=([^,=]+)\/i) {\n\t\t\t\tupdate reply {\n\t\t\t\t\tClass += "%{1}"\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}/' "$site_config"
-    
-    # Link to FreeRADIUS
-    ln -sf "$site_config" /etc/raddb/sites-enabled/default
-    
+    # Ensure default site is enabled
+    ln -sf /etc/raddb/sites-available/default /etc/raddb/sites-enabled/default
     # Add memberOf to dictionary if not present
     if ! grep -q "memberOf" /etc/raddb/dictionary; then
         echo -e "ATTRIBUTE\tmemberOf\t\t3101\tstring" >> /etc/raddb/dictionary
@@ -590,7 +584,10 @@ show_configuration_summary() {
 }
 
 save_passwords() {
-    cat > "$LOG_FILE.passwords" << EOF
+    local secrets_dir="/etc/ipa/secrets"
+    mkdir -p "$secrets_dir"
+    local secrets_file="$secrets_dir/install-ipa-$(date +%Y%m%d-%H%M%S).passwords"
+    cat > "$secrets_file" << EOF
 FreeIPA Installation Passwords
 Generated on: $(date)
 FQDN: $IPA_FQDN
@@ -603,8 +600,59 @@ RADIUS Client Secret: $RADIUS_SECRET
 
 Log file: $LOG_FILE
 EOF
-    chmod 600 "$LOG_FILE.passwords"
-    log "Passwords saved to: $LOG_FILE.passwords"
+    chmod 600 "$secrets_file"
+    log "Passwords saved to: $secrets_file"
+}
+
+configure_nginx_reverse_proxy() {
+    log "Installing and configuring nginx reverse proxy for FreeIPA web UI..."
+    # Install nginx
+    if ! command -v nginx >/dev/null 2>&1; then
+        install_packages nginx
+    fi
+
+    # Create nginx config for FreeIPA reverse proxy
+    local nginx_conf="/etc/nginx/conf.d/freeipa-reverse.conf"
+    local ipa_web_port=443
+    local ipa_web_host="$IPA_FQDN"
+    local server_ip
+    server_ip=$(hostname -I | awk '{print $1}')
+
+    cat > "$nginx_conf" <<EOF
+server {
+    listen 443 ssl;
+    server_name $server_ip;
+
+    ssl_certificate     /etc/pki/tls/certs/localhost.crt;
+    ssl_certificate_key /etc/pki/tls/private/localhost.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    location / {
+        proxy_pass https://$ipa_web_host:$ipa_web_port;
+        proxy_set_header Host $ipa_web_host;
+        proxy_set_header X-Real-IP  $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_verify off;
+    }
+}
+EOF
+
+    # Generate self-signed cert if not present
+    if [[ ! -f /etc/pki/tls/certs/localhost.crt || ! -f /etc/pki/tls/private/localhost.key ]]; then
+        log "Generating self-signed SSL certificate for nginx..."
+        mkdir -p /etc/pki/tls/certs /etc/pki/tls/private
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout /etc/pki/tls/private/localhost.key \
+            -out /etc/pki/tls/certs/localhost.crt \
+            -subj "/CN=$server_ip"
+    fi
+
+    # Enable and start nginx
+    systemctl enable nginx
+    systemctl restart nginx
+
+    log "nginx reverse proxy is configured. Users can access FreeIPA web UI via https://$server_ip"
 }
 
 # --- Main Function ---
@@ -638,19 +686,22 @@ main() {
         configure_freeradius
     fi
     
+    # Install and configure nginx reverse proxy for FreeIPA web UI
+    configure_nginx_reverse_proxy
+    
     # Save passwords
     save_passwords
     
     log "=== Installation Complete ==="
     log "FreeIPA server is now running"
-    log "You can access the web interface at: https://$IPA_FQDN"
+    log "You can access the web interface at: https://$IPA_FQDN or https://<server-ip>"
     log "Admin username: admin"
     log "Admin password: $ADMIN_PASSWORD"
     if [[ "$REPLICA_MODE" != true ]]; then
         log "FreeRADIUS is configured and running"
         log "RADIUS client secret: $RADIUS_SECRET"
     fi
-    log "All passwords saved to: $LOG_FILE.passwords"
+    log "All passwords saved to: $secrets_file"
 }
 
 # Execute main function with all arguments
