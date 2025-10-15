@@ -410,15 +410,12 @@ configure_freeradius() {
 }
 
 configure_radius_ldap() {
-    local ldap_config="/etc/raddb/mods-available/ldap"
+    local ldap_config="/etc/raddb/mods-available/ipa-ldap"
     local base_dn="cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
 
-    log "Configuring FreeRADIUS LDAP module..."
+    log "Configuring FreeRADIUS IPA LDAP module..."
 
-    # Backup original LDAP config
-    [[ ! -f "${ldap_config}.orig" ]] && cp "$ldap_config" "${ldap_config}.orig"
-
-    # Generate complete LDAP configuration file
+    # Generate complete IPA LDAP configuration file
     cat > "$ldap_config" << 'LDAPEOF'
 # -*- text -*-
 #
@@ -550,10 +547,10 @@ LDAPEOF
 }
 LDAPEOF2
 
-    # Enable LDAP module
-    ln -sf /etc/raddb/mods-available/ldap /etc/raddb/mods-enabled/ldap
+    # Enable IPA LDAP module with symlink
+    ln -sf /etc/raddb/mods-available/ipa-ldap /etc/raddb/mods-enabled/ldap
     
-    log "LDAP module configured successfully"
+    log "IPA LDAP module configured successfully"
 }
 
 configure_radius_clients() {
@@ -606,14 +603,11 @@ EOF
 }
 
 configure_radius_site() {
-    local site_config="/etc/raddb/sites-available/default"
+    local site_config="/etc/raddb/sites-available/ipa"
     
-    log "Configuring FreeRADIUS default site..."
+    log "Configuring FreeRADIUS IPA site..."
     
-    # Backup original site config
-    [[ ! -f "${site_config}.orig" ]] && cp "$site_config" "${site_config}.orig"
-    
-    # Generate complete default site configuration
+    # Generate complete IPA site configuration
     cat > "$site_config" << 'SITEEOF'
 # -*- text -*-
 #
@@ -673,7 +667,6 @@ authorize {
 	files
 	-sql
 	-ldap
-	ldap
 	expiration
 	logintime
 	pap
@@ -754,10 +747,10 @@ post-proxy {
 }
 SITEEOF
 
-    # Enable the default site
-    ln -sf /etc/raddb/sites-available/default /etc/raddb/sites-enabled/default
+    # Disable default site and enable IPA site
+    ln -sf /etc/raddb/sites-available/ipa /etc/raddb/sites-enabled/default
     
-    log "Default site configured successfully with group membership support"
+    log "IPA site configured successfully with group membership support"
 }
 
 # --- Argument Parsing ---
