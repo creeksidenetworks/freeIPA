@@ -1,11 +1,10 @@
 #!/bin/bash
 
 # ==============================================================================
-# FreeIPA Server and FreeRADIUS Installation Script for Rocky Linux 8/9
+# FreeIPA Server Installation Script for Rocky Linux 8/9
 # ==============================================================================
 # This script automates the installation of a FreeIPA server on Rocky Linux.
 # It can install either a primary FreeIPA server or a replica server.
-# It also installs and configures FreeRADIUS to use ipaNTHash for MS-CHAPv2.
 #
 # IMPORTANT: This script MUST be run with root privileges (e.g., `sudo`).
 #
@@ -20,7 +19,7 @@
 #
 # Example:
 #   ./install-ipa.sh -h ipa.example.com
-#   ./install-ipa.sh -h ipa2.example.com -r -d MyDMPass123 -p MyAdminPass123
+#   ./install-ipa.sh -h ipa2.example.com -r -p MyAdminPass123
 # ==============================================================================
 
 set -e
@@ -34,7 +33,6 @@ IPA_REALM=""
 DM_PASSWORD=""
 ADMIN_PASSWORD=""
 REPLICA_MODE=false
-RADIUS_SECRET=""
 
 # --- Helper Functions ---
 
@@ -66,7 +64,8 @@ Usage: $0 -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>]
 Arguments:
   -h <fqdn>        IPA FQDN (e.g., ipa.example.com)
   -r              Replica mode (default is standalone)
-  -d <password>   Directory Manager password (random if not provided for standalone)
+  -d <password>   Directory Manager password (random if not provided for standalone,
+                  optional for replica - use to store in /etc/ipa/secrets for FreeRADIUS)
   -p <password>   Admin password (required for replica, random if not provided for standalone)
   -?              Show this help
 
@@ -77,6 +76,9 @@ Examples:
   # Replica server (requires existing IPA domain)
   $0 -h ipa2.example.com -r -p AdminPassword123
 
+  # Replica with DM password for FreeRADIUS installation
+  $0 -h ipa2.example.com -r -p AdminPass123 -d DMPassword123
+
   # Standalone with custom passwords
   $0 -h ipa.example.com -d MyDMPass123 -p MyAdminPass123
 
@@ -84,6 +86,8 @@ Note for Replica Mode:
   - The server will first join the existing IPA domain as a client
   - Then it will be promoted to a replica server
   - Admin password is required to join the domain
+  - Directory Manager password is optional but recommended if you plan to install FreeRADIUS
+  - The DM password is shared across all servers in the domain
   - Ensure DNS can resolve the primary IPA server
 EOF
 }
@@ -189,8 +193,7 @@ install_standalone_server() {
     # Install required packages
     local packages=(
         "bind" "bind-dyndb-ldap" "ipa-server" "ipa-server-dns" 
-        "freeipa-server-trust-ad" "freeradius" "freeradius-ldap" 
-        "freeradius-krb5" "freeradius-utils"
+        "freeipa-server-trust-ad"
     )
     install_packages "${packages[@]}"
     
@@ -242,7 +245,6 @@ install_replica_server() {
     fi
     packages+=(
         "ipa-server" "ipa-server-dns" "freeipa-server-trust-ad"
-        "freeradius" "freeradius-ldap" "freeradius-krb5" "freeradius-utils"
     )
     install_packages "${packages[@]}"
     
@@ -264,17 +266,51 @@ install_replica_server() {
 join_ipa_domain() {
     log "Joining FreeIPA domain as client..."
     
-    # Try to discover the primary server
+    # Try to discover the primary server (exclude ourselves)
     local primary_server
-    primary_server=$(dig +short _ldap._tcp."$IPA_DOMAIN" SRV | head -1 | awk '{print $4}' | sed 's/\.$//')
+    local current_fqdn="$IPA_FQDN"
     
+    # Get all LDAP servers from SRV records
+    local srv_results=$(dig +short _ldap._tcp."$IPA_DOMAIN" SRV 2>/dev/null | awk '{print $4}' | sed 's/\.$//')
+    
+    if [[ -n "$srv_results" ]]; then
+        # Filter out the current server
+        while IFS= read -r server; do
+            if [[ "$server" != "$current_fqdn" ]] && [[ -n "$server" ]]; then
+                primary_server="$server"
+                log "Discovered FreeIPA server: $primary_server"
+                break
+            fi
+        done <<< "$srv_results"
+    fi
+    
+    # If still no server found, prompt for manual input
     if [[ -z "$primary_server" ]]; then
-        log "Could not auto-discover primary server, prompting for manual input"
+        log "Could not auto-discover primary server (or no other servers found)"
         read -p "Enter the FQDN of the primary FreeIPA server: " primary_server
         [[ -z "$primary_server" ]] && error_exit "Primary server FQDN is required"
     fi
     
+    # Ensure we're not using ourselves as the enrollment server
+    if [[ "$primary_server" == "$current_fqdn" ]]; then
+        log "ERROR: Cannot use replica server ($current_fqdn) as enrollment server"
+        read -p "Enter the FQDN of an existing FreeIPA server: " primary_server
+        [[ -z "$primary_server" ]] && error_exit "Primary server FQDN is required"
+        
+        if [[ "$primary_server" == "$current_fqdn" ]]; then
+            error_exit "Cannot use the replica server itself as enrollment server. Please provide a different server."
+        fi
+    fi
+    
     log "Primary FreeIPA server: $primary_server"
+    
+    # Verify the server is reachable
+    log "Verifying primary server is reachable..."
+    if ! ping -c 1 -W 2 "$primary_server" >/dev/null 2>&1; then
+        log "WARNING: Cannot ping $primary_server"
+        read -p "Server is not responding to ping. Continue anyway? (y/N): " confirm
+        [[ "$confirm" != "y" && "$confirm" != "Y" ]] && error_exit "Cannot reach primary server"
+    fi
     
     # Get admin credentials for joining
     local admin_user="admin"
@@ -291,6 +327,9 @@ join_ipa_domain() {
     
     # Join the domain
     log "Joining domain $IPA_DOMAIN..."
+    
+    # Check if client is already installed but just needs re-enrollment
+        
     ipa-client-install \
         --server="$primary_server" \
         --domain="$IPA_DOMAIN" \
@@ -299,23 +338,33 @@ join_ipa_domain() {
         --principal="$admin_user" \
         --password="$admin_password" \
         --mkhomedir \
-        --unattended || error_exit "Failed to join FreeIPA domain"
+        --force-join \
+        --unattended 2>&1 | tee -a "$LOG_FILE" || {
+            log "ERROR: Client installation failed. Last 30 lines of /var/log/ipaclient-install.log:"
+            tail -30 /var/log/ipaclient-install.log 2>/dev/null | tee -a "$LOG_FILE" || true
+            error_exit "Failed to join FreeIPA domain with --force-join. Check logs above."
+        }
     
     log "Successfully joined FreeIPA domain"
     
-    # Verify we can get Kerberos ticket
-    echo "$admin_password" | kinit "$admin_user" || error_exit "Failed to get Kerberos ticket"
+        # Verify we can get Kerberos ticket (use full principal with realm)
+    echo "$admin_password" | kinit "${admin_user}@${IPA_REALM}" || error_exit "Failed to get Kerberos ticket"
     log "Kerberos authentication successful"
+    
+    # Verify ipa command is working
+    if ! ipa env realm >/dev/null 2>&1; then
+        error_exit "IPA command not working properly after client installation. Try re-running the script."
+    fi
     
     # Add host to ipaservers group (REQUIRED for replica promotion)
     log "Adding host to ipaservers group (required for replica)..."
     
     # First check if already member
-    if ipa hostgroup-show ipaservers --hosts | grep -q "$IPA_FQDN"; then
+    if ipa hostgroup-show ipaservers 2>/dev/null | grep -E "Member hosts:.*\b$IPA_FQDN\b"; then
         log "Host is already a member of ipaservers group"
     else
         log "Adding $IPA_FQDN to ipaservers hostgroup..."
-        if ipa hostgroup-add-member ipaservers --hosts="$IPA_FQDN"; then
+        if ipa hostgroup-add-member ipaservers --hosts="$IPA_FQDN" 2>&1 | tee -a "$LOG_FILE"; then
             log "Successfully added host to ipaservers group"
         else
             error_exit "CRITICAL: Failed to add host to ipaservers group. This is required for replica installation.
@@ -329,22 +378,92 @@ Then re-run this script."
     
     # Verify membership
     log "Verifying ipaservers group membership..."
-    if ipa hostgroup-show ipaservers --hosts | grep -q "$IPA_FQDN"; then
+    if ipa hostgroup-show ipaservers 2>/dev/null | grep -E "Member hosts:.*\b$IPA_FQDN\b"; then
         log "✓ Host is confirmed as member of ipaservers group"
     else
         error_exit "Host is not a member of ipaservers group. Cannot proceed with replica installation."
     fi
 }
 
+add_ipa_servers_to_hosts() {
+    log "Adding IPA servers to /etc/hosts for reverse DNS resolution..."
+    
+    # Get list of all IPA servers
+    local ipa_servers=$(ipa server-find --raw 2>/dev/null | grep "cn:" | awk '{print $2}')
+    
+    if [[ -z "$ipa_servers" ]]; then
+        log "WARNING: Could not get list of IPA servers from ipa server-find"
+        return
+    fi
+    
+    # For each server, resolve IP and add to /etc/hosts if not already present
+    while IFS= read -r server; do
+        [[ -z "$server" ]] && continue
+        
+        # Skip if server already in /etc/hosts
+        if grep -q "$server" /etc/hosts; then
+            log "  ✓ $server already in /etc/hosts"
+            continue
+        fi
+        
+        # Resolve the server's IP
+        local server_ip=$(dig +short "$server" A | head -1)
+        
+        if [[ -z "$server_ip" ]] || [[ ! "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log "  WARNING: Could not resolve IP for $server, skipping"
+            continue
+        fi
+        
+        # Add to /etc/hosts
+        local hostname=$(echo "$server" | cut -d'.' -f1)
+        echo "$server_ip $server $hostname" >> /etc/hosts
+        log "  ✓ Added $server ($server_ip) to /etc/hosts"
+        
+    done <<< "$ipa_servers"
+    
+    log "Completed updating /etc/hosts with IPA servers"
+}
+
 promote_to_replica() {
     log "Promoting client to replica server..."
     
+    # Pre-promotion verification: Ensure host exists in IPA
+    log "Pre-promotion check: Verifying host exists in IPA..."
+    if ! ipa host-show "$IPA_FQDN" >/dev/null 2>&1; then
+        log "WARNING: Host $IPA_FQDN does not exist in IPA database"
+        log "This usually means the client enrollment didn't complete properly"
+        error_exit "Host not found in IPA. Please verify client installation completed successfully and re-run the script."
+    fi
+    log "✓ Host exists in IPA"
+    
     # Pre-promotion verification: Check ipaservers group membership
     log "Pre-promotion check: Verifying ipaservers group membership..."
-    if ! ipa hostgroup-show ipaservers --hosts 2>/dev/null | grep -q "$IPA_FQDN"; then
-        error_exit "CRITICAL: Host $IPA_FQDN is not a member of ipaservers group. 
-Replica promotion will fail. Please add the host to ipaservers group first:
+    if ! ipa hostgroup-show ipaservers 2>/dev/null | grep -E "Member hosts:.*\b$IPA_FQDN\b"; then
+        log "Host is not a member of ipaservers group. Adding it now..."
+        
+        if ipa hostgroup-add-member ipaservers --hosts="$IPA_FQDN" 2>&1 | tee -a "$LOG_FILE" | grep -q "Number of members added 1"; then
+            log "✓ Successfully added host to ipaservers group"
+        else
+            log "Failed to add host to ipaservers group. Checking for error details..."
+            if tail -5 "$LOG_FILE" | grep -q "no such entry"; then
+                error_exit "CRITICAL: Host $IPA_FQDN does not exist in IPA database. Cannot add to hostgroup.
+                
+This indicates the client enrollment was incomplete. Please verify:
+1. Client installation completed successfully
+2. Host exists: ipa host-show $IPA_FQDN
+3. If host doesn't exist, re-run client installation"
+            else
+                error_exit "CRITICAL: Failed to add host to ipaservers group. Check the log above for details.
+    
+Manual fix: Run the following command:
     ipa hostgroup-add-member ipaservers --hosts=$IPA_FQDN"
+            fi
+        fi
+        
+        # Verify it was added
+        if ! ipa hostgroup-show ipaservers 2>/dev/null | grep -E "Member hosts:.*\b$IPA_FQDN\b"; then
+            error_exit "CRITICAL: Failed to verify host membership in ipaservers group after adding it."
+        fi
     fi
     log "✓ Pre-promotion check passed: Host is member of ipaservers group"
     
@@ -358,8 +477,12 @@ Replica promotion will fail. Please add the host to ipaservers group first:
             read -s -p "Enter the admin password: " admin_password
             echo
         fi
-        echo "$admin_password" | kinit admin || error_exit "Failed to get Kerberos ticket for replica promotion"
+        echo "$admin_password" | kinit "admin@${IPA_REALM}" || error_exit "Failed to get Kerberos ticket for replica promotion"
     fi
+    
+    # Add all IPA servers to /etc/hosts to ensure reverse DNS works
+    log "Ensuring all IPA servers are in /etc/hosts for reverse DNS resolution..."
+    add_ipa_servers_to_hosts
     
     log "Starting replica promotion..."
     ipa-replica-install \
@@ -374,6 +497,8 @@ Replica promotion will fail. Please add the host to ipaservers group first:
     
     log "Replica promotion completed successfully"
 }
+
+# --- Argument Parsing ---
 
 # --- FreeRADIUS Configuration ---
 
@@ -799,10 +924,16 @@ parse_arguments() {
     # Generate passwords if not provided
     if [[ -z "$DM_PASSWORD" ]]; then
         if [[ "$REPLICA_MODE" = true ]]; then
-            log "Replica mode: Directory Manager password not required for replica installation"
+            log "Replica mode: Directory Manager password not provided"
+            log "  If you plan to install FreeRADIUS, provide DM password with -d option"
+            log "  or you will be prompted during install-radius.sh"
         else
             DM_PASSWORD=$(generate_password)
             log "Generated Directory Manager password: $DM_PASSWORD"
+        fi
+    else
+        if [[ "$REPLICA_MODE" = true ]]; then
+            log "Directory Manager password provided and will be saved to /etc/ipa/secrets"
         fi
     fi
     
@@ -815,9 +946,6 @@ parse_arguments() {
             log "Generated Admin password: $ADMIN_PASSWORD"
         fi
     fi
-    
-    # Generate RADIUS secret
-    RADIUS_SECRET=$(generate_password)
 }
 
 # --- Summary and Confirmation ---
@@ -830,7 +958,6 @@ show_configuration_summary() {
     log "Mode: $([ "$REPLICA_MODE" = true ] && echo "Replica" || echo "Standalone")"
     log "Directory Manager Password: $DM_PASSWORD"
     log "Admin Password: $ADMIN_PASSWORD"
-    log "RADIUS Secret: $RADIUS_SECRET"
     log "Log File: $LOG_FILE"
     log "================================="
 }
@@ -841,6 +968,14 @@ save_passwords() {
     # Create /etc/ipa directory if it doesn't exist
     mkdir -p /etc/ipa
     
+    # For replicas, DM password might not be set, so we need to prompt or note it
+    local dm_pass_note=""
+    if [[ -z "$DM_PASSWORD" ]]; then
+        dm_pass_note="<Use Directory Manager password from primary server>"
+    else
+        dm_pass_note="$DM_PASSWORD"
+    fi
+    
     # Save secrets to /etc/ipa/secrets
     cat > "$secrets_file" << EOF
 # FreeIPA Installation Secrets
@@ -849,14 +984,19 @@ save_passwords() {
 # Domain: $IPA_DOMAIN
 # Realm: $IPA_REALM
 
-Directory Manager Password: $DM_PASSWORD
+Directory Manager Password: $dm_pass_note
 Admin Password: $ADMIN_PASSWORD
-RADIUS Client Secret: $RADIUS_SECRET
 
 Log file: $LOG_FILE
 EOF
     chmod 600 "$secrets_file"
     log "Secrets saved to: $secrets_file"
+    
+    if [[ -z "$DM_PASSWORD" ]]; then
+        log "NOTE: Directory Manager password not set. For FreeRADIUS installation,"
+        log "      you will need to provide the Directory Manager password from the primary server."
+        log "      Update $secrets_file with the correct password or use -d option with install-radius.sh"
+    fi
     
     # Also save to log file location for backwards compatibility
     cat > "$LOG_FILE.passwords" << EOF
@@ -866,9 +1006,8 @@ FQDN: $IPA_FQDN
 Domain: $IPA_DOMAIN
 Realm: $IPA_REALM
 
-Directory Manager Password: $DM_PASSWORD
+Directory Manager Password: $dm_pass_note
 Admin Password: $ADMIN_PASSWORD
-RADIUS Client Secret: $RADIUS_SECRET
 
 Log file: $LOG_FILE
 EOF
@@ -902,11 +1041,6 @@ main() {
         install_standalone_server
     fi
     
-    # Configure FreeRADIUS (only for standalone mode)
-    if [[ "$REPLICA_MODE" != true ]]; then
-        configure_freeradius
-    fi
-    
     # Save passwords
     save_passwords
     
@@ -915,12 +1049,10 @@ main() {
     log "You can access the web interface at: https://$IPA_FQDN"
     log "Admin username: admin"
     log "Admin password: $ADMIN_PASSWORD"
-    if [[ "$REPLICA_MODE" != true ]]; then
-        log "FreeRADIUS is configured and running"
-        log "RADIUS client secret: $RADIUS_SECRET"
-    fi
     log "All secrets saved to: /etc/ipa/secrets"
     log "Installation log: $LOG_FILE"
+    log ""
+    log "To install FreeRADIUS, run: ./install-radius.sh"
 }
 
 # Execute main function with all arguments
