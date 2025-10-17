@@ -1,6 +1,22 @@
 # FreeIPA Installation Scripts
 
-Automated installation scripts for FreeIPA server and FreeRADIUS on Rocky Linux 8/9.
+Automated installa### install-radius.sh
+Installs FreeRADIUS with FreeIPA LDAP backend.
+
+**Prerequisites:** FreeIPA must be installed first
+
+**Arguments:**
+- `-p <password>` - Admin password (reads from `/etc/ipa/secrets` if omitted)
+- `-s <secret>` - RADIUS client secret (random if not provided)
+
+**Examples:**
+```bash
+# Use passwords from /etc/ipa/secrets
+sudo ./install-radius.sh
+
+# Provide Admin password
+sudo ./install-radius.sh -p MyAdminPass123
+```FreeIPA server and FreeRADIUS on Rocky Linux 8/9.
 
 ## Quick Start
 
@@ -28,7 +44,7 @@ Installs FreeIPA server in standalone or replica mode.
 - `-h <fqdn>` - IPA FQDN (required) - e.g., `ipa.example.com`
 - `-r` - Replica mode (omit for standalone)
 - `-p <password>` - Admin password (random if not provided)
-- `-d <password>` - Directory Manager password (optional, needed for FreeRADIUS)
+- `-d <password>` - Directory Manager password (optional, not needed for FreeRADIUS)
 
 **Examples:**
 ```bash
@@ -38,11 +54,12 @@ sudo ./install-ipa.sh -h ipa.example.com
 # Replica with admin password (recommended)
 sudo ./install-ipa.sh -h ipa2.example.com -r -p MyAdminPass123
 
-# Replica with both passwords (needed for FreeRADIUS installation)
-sudo ./install-ipa.sh -h ipa2.example.com -r -p MyAdminPass123 -d MyDMPass123
+# Custom passwords (DM password optional)
+sudo ./install-ipa.sh -h ipa.example.com -p MyAdminPass123
 ```
 
 **What it does:**
+- Checks if network interface has static IP (converts from DHCP if needed)
 - Installs FreeIPA with DNS, CA, and AD trust
 - Configures hostname and firewall
 - For replicas: joins domain as client, promotes to replica
@@ -54,7 +71,7 @@ Installs FreeRADIUS with FreeIPA LDAP backend.
 **Prerequisites:** FreeIPA must be installed first
 
 **Arguments:**
-- `-d <password>` - Directory Manager password (reads from `/etc/ipa/secrets` if omitted)
+- `-a <password>` - Admin password (reads from `/etc/ipa/secrets` if omitted)
 - `-s <secret>` - RADIUS client secret (random if not provided)
 
 **Examples:**
@@ -62,15 +79,16 @@ Installs FreeRADIUS with FreeIPA LDAP backend.
 # Use passwords from /etc/ipa/secrets
 sudo ./install-radius.sh
 
-# Provide Directory Manager password
-sudo ./install-radius.sh -d MyDMPass123
+# Provide Admin password
+sudo ./install-radius.sh -a MyAdminPass123
 ```
 
 **What it does:**
+- Creates service account `rad-auth` in FreeIPA for RADIUS LDAP authentication
 - Installs FreeRADIUS packages
 - Configures LDAP authentication with ipaNTHash (MS-CHAPv2)
 - Extracts group membership as RADIUS Class attributes
-- Updates `/etc/ipa/secrets` with RADIUS secret
+- Updates `/etc/ipa/secrets` with service account and RADIUS secrets
 
 ## Complete Installation Examples
 
@@ -85,10 +103,10 @@ sudo ./install-radius.sh
 
 ### Replica Server with RADIUS
 ```bash
-# Step 1: Install FreeIPA replica (include -d for FreeRADIUS)
-sudo ./install-ipa.sh -h ipa2.example.com -r -p AdminPass -d DMPass
+# Step 1: Install FreeIPA replica (admin password required)
+sudo ./install-ipa.sh -h ipa2.example.com -r -p AdminPass
 
-# Step 2: Install FreeRADIUS
+# Step 2: Install FreeRADIUS (will use admin credentials)
 sudo ./install-radius.sh
 ```
 
@@ -120,7 +138,7 @@ cat /etc/ipa/secrets
 ## Prerequisites
 
 - Rocky Linux 8 or 9 (or RHEL 8/9)
-- Static IP address
+- Network interface with IP address (can be DHCP, will be converted to static)
 - Root privileges
 - DNS resolution (for replicas)
 - Min 2GB RAM, 10GB disk
@@ -167,7 +185,7 @@ ipa server-del ipa2.example.com --force
 - `/etc/ipa/secrets` - Stored passwords
 
 **FreeRADIUS:**
-- `/etc/raddb/mods-available/ipa-ldap` - LDAP module
+- `/etc/raddb/mods-available/ipa-ldap` - LDAP module (uses radauth service account)
 - `/etc/raddb/sites-available/ipa` - IPA site config
 - `/etc/raddb/clients.conf` - RADIUS clients
 
@@ -175,8 +193,8 @@ ipa server-del ipa2.example.com --force
 
 - **Passwords**: Saved in `/etc/ipa/secrets` (mode 600)
 - **Replicas**: Admin password required for domain join
-- **Directory Manager password**: Shared across all IPA servers
-- **FreeRADIUS on replicas**: Must provide DM password with `-d` flag or when prompted
+- **Service Account**: FreeRADIUS uses `radauth` service account (not Directory Manager)
+- **FreeRADIUS on replicas**: Requires admin password to create service account
 - **Logs**: Keep installation logs for troubleshooting
 
 ## References

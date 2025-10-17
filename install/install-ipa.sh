@@ -65,7 +65,7 @@ Arguments:
   -h <fqdn>        IPA FQDN (e.g., ipa.example.com)
   -r              Replica mode (default is standalone)
   -d <password>   Directory Manager password (random if not provided for standalone,
-                  optional for replica - use to store in /etc/ipa/secrets for FreeRADIUS)
+                  optional for replica)
   -p <password>   Admin password (required for replica, random if not provided for standalone)
   -?              Show this help
 
@@ -76,7 +76,7 @@ Examples:
   # Replica server (requires existing IPA domain)
   $0 -h ipa2.example.com -r -p AdminPassword123
 
-  # Replica with DM password for FreeRADIUS installation
+  # Replica with DM password stored for later use
   $0 -h ipa2.example.com -r -p AdminPass123 -d DMPassword123
 
   # Standalone with custom passwords
@@ -86,7 +86,7 @@ Note for Replica Mode:
   - The server will first join the existing IPA domain as a client
   - Then it will be promoted to a replica server
   - Admin password is required to join the domain
-  - Directory Manager password is optional but recommended if you plan to install FreeRADIUS
+  - Directory Manager password is optional but can be stored for later use
   - The DM password is shared across all servers in the domain
   - Ensure DNS can resolve the primary IPA server
 EOF
@@ -156,6 +156,100 @@ get_primary_ip() {
     ip -4 addr show "$interface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1
 }
 
+check_and_configure_static_ip() {
+    local interface=$(get_primary_interface)
+    [[ -z "$interface" ]] && error_exit "Could not determine primary network interface"
+    
+    local current_ip=$(get_primary_ip)
+    [[ -z "$current_ip" ]] && error_exit "Could not determine current IP address"
+    
+    log "Checking network configuration for interface: $interface"
+    log "Current IP address: $current_ip"
+    
+    # Check if using NetworkManager
+    if systemctl is-active --quiet NetworkManager; then
+        local connection_name=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$interface$" | cut -d: -f1)
+        
+        if [[ -z "$connection_name" ]]; then
+            log "WARNING: No active NetworkManager connection found for $interface"
+            return 1
+        fi
+        
+        log "Active connection: $connection_name"
+        
+        # Check if DHCP is enabled (ipv4.method)
+        local ipv4_method=$(nmcli -t -f ipv4.method connection show "$connection_name" | cut -d: -f2)
+        
+        if [[ "$ipv4_method" == "auto" || "$ipv4_method" == "dhcp" ]]; then
+            log "WARNING: Interface $interface is configured for DHCP"
+            log "FreeIPA requires a static IP address"
+            
+            read -p "Convert $interface to static IP ($current_ip)? [y/N]: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                error_exit "Static IP is required for FreeIPA installation. Exiting."
+            fi
+            
+            # Get current network configuration
+            local gateway=$(ip route | grep "^default" | grep "$interface" | awk '{print $3}' | head -1)
+            local prefix=$(ip -o -f inet addr show "$interface" | awk '{print $4}' | cut -d/ -f2 | head -1)
+            local dns_servers=$(nmcli -t -f IP4.DNS connection show "$connection_name" | cut -d: -f2 | tr '\n' ' ')
+            
+            # If no DNS servers configured, use common defaults
+            if [[ -z "$dns_servers" ]]; then
+                dns_servers="8.8.8.8 8.8.4.4"
+                log "No DNS servers found, using: $dns_servers"
+            fi
+            
+            log "Converting to static IP configuration:"
+            log "  IP Address: $current_ip/$prefix"
+            log "  Gateway: $gateway"
+            log "  DNS: $dns_servers"
+            
+            # Modify connection to use static IP
+            nmcli connection modify "$connection_name" \
+                ipv4.method manual \
+                ipv4.addresses "$current_ip/$prefix" \
+                ipv4.gateway "$gateway" \
+                ipv4.dns "$dns_servers" || error_exit "Failed to configure static IP"
+            
+            # Bring connection down and up to apply changes
+            log "Applying network configuration changes..."
+            nmcli connection down "$connection_name" >/dev/null 2>&1 || true
+            sleep 2
+            nmcli connection up "$connection_name" || error_exit "Failed to bring up connection with static IP"
+            
+            # Wait for network to stabilize
+            log "Waiting for network to stabilize..."
+            sleep 5
+            
+            # Verify IP didn't change
+            local new_ip=$(get_primary_ip)
+            if [[ "$new_ip" != "$current_ip" ]]; then
+                error_exit "IP address changed after converting to static ($current_ip -> $new_ip). Please check network configuration."
+            fi
+            
+            log "✓ Successfully converted to static IP: $current_ip"
+        else
+            log "✓ Interface $interface is already configured with static IP ($ipv4_method)"
+        fi
+    else
+        log "NetworkManager is not active, checking network-scripts..."
+        
+        local ifcfg_file="/etc/sysconfig/network-scripts/ifcfg-$interface"
+        if [[ -f "$ifcfg_file" ]]; then
+            if grep -q "BOOTPROTO=dhcp" "$ifcfg_file"; then
+                log "WARNING: Interface $interface is configured for DHCP in $ifcfg_file"
+                error_exit "Please manually configure $interface with static IP before proceeding. Edit $ifcfg_file and set BOOTPROTO=static with appropriate IP settings."
+            else
+                log "✓ Interface $interface appears to have static configuration"
+            fi
+        else
+            log "WARNING: Network configuration file not found: $ifcfg_file"
+            log "Unable to verify static IP configuration"
+        fi
+    fi
+}
+
 configure_hostname() {
     local hostname=$1
     local domain=$2
@@ -172,14 +266,86 @@ configure_hostname() {
 configure_firewall() {
     log "Configuring firewall..."
     systemctl enable --now firewalld
-    firewall-cmd --permanent --add-service={ntp,dns,freeipa-ldap,freeipa-ldaps,freeipa-replication,freeipa-trust,radius} >/dev/null
+    firewall-cmd --permanent --add-service={ntp,dns,freeipa-ldap,freeipa-ldaps,freeipa-replication,freeipa-trust} >/dev/null
     firewall-cmd --reload >/dev/null
+}
+
+# --- LDAP Service Account Creation ---
+
+create_ldapauth_service_account() {
+    log "Creating ldapauth service account for LDAP authentication..."
+    
+    local service_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    local ldapauth_password=$(generate_password)
+    
+    # Get Kerberos ticket as admin
+    echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" || error_exit "Failed to get Kerberos ticket"
+    
+    # Create LDIF for service account
+    cat > /tmp/ldapauth.ldif << EOF
+dn: $service_dn
+objectClass: account
+objectClass: simplesecurityobject
+uid: ldapauth
+userPassword: $ldapauth_password
+description: LDAP authentication service account for applications requiring LDAP access
+EOF
+    
+    # Add service account (use FQDN instead of localhost)
+    if ldapadd -Y GSSAPI -H ldap://"$IPA_FQDN" -f /tmp/ldapauth.ldif; then
+        rm -f /tmp/ldapauth.ldif
+        log "✓ Service account 'ldapauth' created successfully"
+        log "Password: $ldapauth_password"
+        
+        # Add ACI to allow ldapauth to read ipaNTHash attribute for MS-CHAP authentication
+        log "Adding permission for ldapauth to read ipaNTHash attribute..."
+        local users_dn="cn=users,cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
+        local aci_name="LDAP Service Account ipaNTHash Access"
+        local aci_value="(targetattr=\"ipaNTHash\")(version 3.0; acl \"$aci_name\"; allow (read,search,compare) userdn=\"ldap:///$service_dn\";)"
+        
+        # Create LDIF to add ACI
+        cat > /tmp/ldapauth_aci.ldif << EOF
+dn: $users_dn
+changetype: modify
+add: aci
+aci: $aci_value
+EOF
+        
+        if ldapmodify -Y GSSAPI -H ldap://"$IPA_FQDN" -f /tmp/ldapauth_aci.ldif 2>/dev/null; then
+            log "✓ Permission granted for ldapauth to read ipaNTHash"
+        else
+            log "WARNING: Could not add ACI for ipaNTHash access (may already exist)"
+        fi
+        rm -f /tmp/ldapauth_aci.ldif
+        
+        # Verify service account can bind (use 127.0.0.1 for simple bind)
+        if ldapsearch -x -D "$service_dn" -w "$ldapauth_password" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
+            log "✓ Service account authentication verified"
+        else
+            log "WARNING: Could not verify service account authentication"
+        fi
+        
+        # Save password to temporary location for later inclusion in secrets file
+        mkdir -p /tmp/ipa-install-secrets
+        echo "LDAP Auth Service Account Password: $ldapauth_password" > /tmp/ipa-install-secrets/ldapauth_password
+        log "✓ Password will be saved to /etc/ipa/secrets"
+    else
+        rm -f /tmp/ldapauth.ldif
+        error_exit "Failed to create ldapauth service account"
+    fi
+    
+    # Destroy kerberos ticket
+    kdestroy 2>/dev/null || true
 }
 
 # --- FreeIPA Installation Functions ---
 
 install_standalone_server() {
     local hostname=$(echo "$IPA_FQDN" | cut -d'.' -f1)
+    
+    # Check and configure static IP before proceeding
+    check_and_configure_static_ip
+    
     local primary_ip=$(get_primary_ip)
     
     [[ -z "$primary_ip" ]] && error_exit "Could not determine primary IP address"
@@ -218,10 +384,17 @@ install_standalone_server() {
         --unattended || error_exit "FreeIPA installation failed"
     
     log "FreeIPA standalone server installation completed successfully"
+    
+    # Create ldapauth service account for LDAP authentication
+    create_ldapauth_service_account
 }
 
 install_replica_server() {
     local hostname=$(echo "$IPA_FQDN" | cut -d'.' -f1)
+    
+    # Check and configure static IP before proceeding
+    check_and_configure_static_ip
+    
     local primary_ip=$(get_primary_ip)
     
     [[ -z "$primary_ip" ]] && error_exit "Could not determine primary IP address"
@@ -500,386 +673,6 @@ Manual fix: Run the following command:
 
 # --- Argument Parsing ---
 
-# --- FreeRADIUS Configuration ---
-
-configure_freeradius() {
-    log "Configuring FreeRADIUS with LDAP backend..."
-    
-    # Generate random RADIUS secret if not provided
-    [[ -z "$RADIUS_SECRET" ]] && RADIUS_SECRET=$(generate_password)
-    
-    # Configure LDAP module
-    configure_radius_ldap
-    
-    # Configure clients
-    configure_radius_clients
-    
-    # Configure default site with group support
-    configure_radius_site
-    
-    # Add memberOf to dictionary if not present
-    if ! grep -q "memberOf" /etc/raddb/dictionary; then
-        echo -e "ATTRIBUTE\tmemberOf\t\t3101\tstring" >> /etc/raddb/dictionary
-    fi
-    
-    # Generate certificates
-    log "Generating RADIUS certificates..."
-    bash /etc/raddb/certs/bootstrap >/dev/null 2>&1 || true
-    
-    # Enable and start FreeRADIUS
-    systemctl enable radiusd
-    systemctl restart radiusd || error_exit "Failed to start FreeRADIUS"
-    
-    log "FreeRADIUS configuration completed successfully"
-    log "RADIUS client secret: $RADIUS_SECRET"
-}
-
-configure_radius_ldap() {
-    local ldap_config="/etc/raddb/mods-available/ipa-ldap"
-    local base_dn="cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
-
-    log "Configuring FreeRADIUS IPA LDAP module..."
-
-    # Generate complete IPA LDAP configuration file
-    cat > "$ldap_config" << 'LDAPEOF'
-# -*- text -*-
-#
-#  FreeRADIUS LDAP module configuration for FreeIPA
-#
-
-ldap {
-    server = '127.0.0.1'
-    port = 389
-    
-    identity = 'cn=Directory Manager'
-LDAPEOF
-
-    # Add password (with variable expansion)
-    echo "    password = '$DM_PASSWORD'" >> "$ldap_config"
-    
-    # Continue with rest of config
-    cat >> "$ldap_config" << LDAPEOF2
-    
-    base_dn = '$base_dn'
-    
-    sasl {
-    }
-    
-    update {
-        control:Password-With-Header    += 'userPassword'
-        control:NT-Password             := 'ipaNTHash'
-        control:LDAP-Group              += 'memberOf'
-        
-        control:                        += 'radiusControlAttribute'
-        request:                        += 'radiusRequestAttribute'
-        reply:                          += 'radiusReplyAttribute'
-		reply:memberOf                  += 'memberOf'
-    }
-    
-    user_dn = "LDAP-UserDn"
-    
-    user {
-        base_dn = "\${..base_dn}"
-        filter = "(uid=%{%{Stripped-User-Name}:-%{User-Name}})"
-        
-        sasl {
-        }
-        
-        scope = 'sub'
-    }
-    
-    group {
-        base_dn = "\${..base_dn}"
-        filter = '(objectClass=posixGroup)'
-        scope = 'sub'
-        name_attribute = cn
-        membership_attribute = 'memberOf'
-        cacheable_name = 'no'
-        cacheable_dn = 'no'
-    }
-    
-    profile {
-    }
-    
-    client {
-        base_dn = "\${..base_dn}"
-        filter = '(objectClass=radiusClient)'
-        
-        template {
-        }
-        
-        attribute {
-            ipaddr              = 'radiusClientIdentifier'
-            secret              = 'radiusClientSecret'
-        }
-    }
-    
-    accounting {
-        reference = "%{tolower:type.%{Acct-Status-Type}}"
-        
-        type {
-            start {
-                update {
-                    description := "Online at %S"
-                }
-            }
-            
-            interim-update {
-                update {
-                    description := "Last seen at %S"
-                }
-            }
-            
-            stop {
-                update {
-                    description := "Offline at %S"
-                }
-            }
-        }
-    }
-    
-    post-auth {
-        update {
-            description := "Authenticated at %S"
-        }
-    }
-    
-    options {
-        chase_referrals = yes
-        rebind = yes
-        res_timeout = 10
-        srv_timelimit = 3
-        net_timeout = 1
-        idle = 60
-        probes = 3
-        interval = 3
-        ldap_debug = 0x0028
-    }
-    
-    tls {
-    }
-    
-    pool {
-        start = \${thread[pool].start_servers}
-        min = \${thread[pool].min_spare_servers}
-        max = \${thread[pool].max_servers}
-        spare = \${thread[pool].max_spare_servers}
-        uses = 0
-        retry_delay = 30
-        lifetime = 0
-        idle_timeout = 60
-    }
-}
-LDAPEOF2
-
-    # Enable IPA LDAP module with symlink
-    ln -sf /etc/raddb/mods-available/ipa-ldap /etc/raddb/mods-enabled/ldap
-    
-    log "IPA LDAP module configured successfully"
-}
-
-configure_radius_clients() {
-    local clients_config="/etc/raddb/clients.conf"
-    
-    log "Configuring FreeRADIUS clients..."
-    
-    # Backup original clients config
-    [[ ! -f "${clients_config}.orig" ]] && cp "$clients_config" "${clients_config}.orig"
-    
-    # Generate complete clients configuration file
-    cat > "$clients_config" << EOF
-# -*- text -*-
-#
-# FreeRADIUS clients configuration for FreeIPA
-#
-
-client localhost {
-    ipaddr = 127.0.0.1
-    proto = *
-    secret = $RADIUS_SECRET
-    require_message_authenticator = no
-    nas_type = other
-    limit {
-        max_connections = 16
-        lifetime = 0
-        idle_timeout = 30
-    }
-}
-
-client localhost_ipv6 {
-    ipv6addr = ::1
-    secret = $RADIUS_SECRET
-}
-
-client localnet {
-    ipaddr = 0.0.0.0/0
-    proto = *
-    secret = $RADIUS_SECRET
-    nas_type = other
-    limit {
-        max_connections = 16
-        lifetime = 0
-        idle_timeout = 30
-    }
-}
-EOF
-    
-    log "Clients configuration generated successfully"
-}
-
-configure_radius_site() {
-    local site_config="/etc/raddb/sites-available/ipa"
-    
-    log "Configuring FreeRADIUS IPA site..."
-    
-    # Generate complete IPA site configuration
-    cat > "$site_config" << 'SITEEOF'
-# -*- text -*-
-#
-# FreeRADIUS default virtual server for FreeIPA
-#
-
-server default {
-
-listen {
-	type = auth
-	ipaddr = *
-	port = 0
-	limit {
-		max_connections = 16
-		lifetime = 0
-		idle_timeout = 30
-	}
-}
-
-listen {
-	ipaddr = *
-	port = 0
-	type = acct
-	limit {
-	}
-}
-
-listen {
-	type = auth
-	ipv6addr = ::
-	port = 0
-	limit {
-		max_connections = 16
-		lifetime = 0
-		idle_timeout = 30
-	}
-}
-
-listen {
-	ipv6addr = ::
-	port = 0
-	type = acct
-	limit {
-	}
-}
-
-authorize {
-	filter_username
-	preprocess
-	chap
-	mschap
-	digest
-	suffix
-	eap {
-		ok = return
-	}
-	files
-	-sql
-	-ldap
-	expiration
-	logintime
-	pap
-}
-
-authenticate {
-	Auth-Type PAP {
-		pap
-	}
-	Auth-Type CHAP {
-		chap
-	}
-	Auth-Type MS-CHAP {
-		mschap
-	}
-	mschap
-	digest
-	eap
-}
-
-preacct {
-	preprocess
-	acct_unique
-	suffix
-	files
-}
-
-accounting {
-	detail
-	unix
-	-sql
-	exec
-	attr_filter.accounting_response
-}
-
-session {
-}
-
-post-auth {
-	update {
-		&reply: += &session-state:
-	}
-	
-	# Process group membership from LDAP memberOf attribute
-	# Extract group names and add to reply
-	foreach &reply:memberOf {
-		if ("%{Foreach-Variable-0}" =~ /cn=groups/i) {
-			if ("%{Foreach-Variable-0}" =~ /cn=([^,=]+)/i) {
-				update reply {
-					Class += "%{1}"
-				}
-			}
-		}
-	}
-	
-	-sql
-	exec
-	remove_reply_message_if_eap
-	
-	Post-Auth-Type REJECT {
-		-sql
-		attr_filter.access_reject
-		eap
-		remove_reply_message_if_eap
-	}
-	
-	Post-Auth-Type Challenge {
-	}
-}
-
-pre-proxy {
-}
-
-post-proxy {
-	eap
-}
-
-}
-SITEEOF
-
-    # Disable default site and enable IPA site
-    ln -sf /etc/raddb/sites-available/ipa /etc/raddb/sites-enabled/default
-    
-    log "IPA site configured successfully with group membership support"
-}
-
-# --- Argument Parsing ---
-
 parse_arguments() {
     while getopts "h:rd:p:?" opt; do
         case $opt in
@@ -925,8 +718,7 @@ parse_arguments() {
     if [[ -z "$DM_PASSWORD" ]]; then
         if [[ "$REPLICA_MODE" = true ]]; then
             log "Replica mode: Directory Manager password not provided"
-            log "  If you plan to install FreeRADIUS, provide DM password with -d option"
-            log "  or you will be prompted during install-radius.sh"
+            log "  Will not be saved to /etc/ipa/secrets"
         else
             DM_PASSWORD=$(generate_password)
             log "Generated Directory Manager password: $DM_PASSWORD"
@@ -989,13 +781,20 @@ Admin Password: $ADMIN_PASSWORD
 
 Log file: $LOG_FILE
 EOF
+
+    # Append ldapauth password if it was created
+    if [[ -f /tmp/ipa-install-secrets/ldapauth_password ]]; then
+        cat /tmp/ipa-install-secrets/ldapauth_password >> "$secrets_file"
+        rm -rf /tmp/ipa-install-secrets
+        log "Added ldapauth service account password to secrets file"
+    fi
+    
     chmod 600 "$secrets_file"
     log "Secrets saved to: $secrets_file"
     
     if [[ -z "$DM_PASSWORD" ]]; then
-        log "NOTE: Directory Manager password not set. For FreeRADIUS installation,"
-        log "      you will need to provide the Directory Manager password from the primary server."
-        log "      Update $secrets_file with the correct password or use -d option with install-radius.sh"
+        log "NOTE: Directory Manager password not set."
+        log "      Update $secrets_file with the correct password or provide with -d option if needed."
     fi
     
     # Also save to log file location for backwards compatibility
@@ -1052,7 +851,10 @@ main() {
     log "All secrets saved to: /etc/ipa/secrets"
     log "Installation log: $LOG_FILE"
     log ""
-    log "To install FreeRADIUS, run: ./install-radius.sh"
+    log "Next steps:"
+    log "  - To install FreeRADIUS: ./install-radius.sh"
+    log "  - To add users: ipa user-add <username>"
+    log "  - To configure replication: Run this script on another server with -r option"
 }
 
 # Execute main function with all arguments

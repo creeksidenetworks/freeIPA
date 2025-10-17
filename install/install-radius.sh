@@ -13,16 +13,16 @@
 #   - /etc/ipa/secrets file should exist (created by install-ipa.sh)
 #
 # Usage:
-#   ./install-radius.sh [-d <dm_password>] [-s <radius_secret>]
+#   ./install-radius.sh [-p <admin_password>] [-s <radius_secret>]
 #
 # Arguments:
-#   -d <password>   : Directory Manager password (reads from /etc/ipa/secrets if not provided)
+#   -p <password>   : Admin password (reads from /etc/ipa/secrets if not provided)
 #   -s <secret>     : RADIUS client secret (random if not provided)
 #   -?              : Show this help
 #
 # Example:
 #   ./install-radius.sh
-#   ./install-radius.sh -d MyDMPass123 -s MyRadiusSecret123
+#   ./install-radius.sh -p MyAdminPass123 -s MyRadiusSecret123
 # ==============================================================================
 
 set -e
@@ -33,7 +33,8 @@ LOG_FILE="/tmp/install-radius-$(date +%Y%m%d-%H%M%S).log"
 IPA_FQDN=""
 IPA_DOMAIN=""
 IPA_REALM=""
-DM_PASSWORD=""
+ADMIN_PASSWORD=""
+RADIUS_SERVICE_PASSWORD=""
 RADIUS_SECRET=""
 SECRETS_FILE="/etc/ipa/secrets"
 
@@ -54,10 +55,10 @@ generate_password() {
 
 show_usage() {
     cat << EOF
-Usage: $0 [-d <dm_password>] [-s <radius_secret>]
+Usage: $0 [-p <admin_password>] [-s <radius_secret>]
 
 Arguments:
-  -d <password>   Directory Manager password (reads from /etc/ipa/secrets if not provided)
+  -p <password>   Admin password (reads from /etc/ipa/secrets if not provided)
   -s <secret>     RADIUS client secret (random if not provided)
   -?              Show this help
 
@@ -65,16 +66,21 @@ Examples:
   # Use passwords from /etc/ipa/secrets
   $0
 
-  # Specify Directory Manager password
-  $0 -d MyDMPass123
+  # Specify Admin password
+  $0 -p MyAdminPass123
 
   # Specify both passwords
-  $0 -d MyDMPass123 -s MyRadiusSecret123
+  $0 -p MyAdminPass123 -s MyRadiusSecret123
 
 Prerequisites:
   - FreeIPA server must be installed and running
   - /etc/ipa/secrets file should exist (created by install-ipa.sh)
-  - If /etc/ipa/secrets doesn't exist, you must provide -d option
+  - If /etc/ipa/secrets doesn't exist, you must provide -p option
+
+Note:
+  - This script will verify or create 'ldapauth' service account in FreeIPA
+  - The service account is used for LDAP authentication (FreeRADIUS and other services)
+  - Password is automatically saved to /etc/ipa/secrets
 EOF
 }
 
@@ -150,11 +156,19 @@ read_secrets_file() {
         return 1
     fi
     
-    # Try to read Directory Manager password from secrets file
-    if [[ -z "$DM_PASSWORD" ]]; then
-        DM_PASSWORD=$(grep "^Directory Manager Password:" "$SECRETS_FILE" | cut -d':' -f2- | sed 's/^[[:space:]]*//')
-        if [[ -n "$DM_PASSWORD" ]]; then
-            log "Read Directory Manager password from $SECRETS_FILE"
+    # Try to read Admin password from secrets file
+    if [[ -z "$ADMIN_PASSWORD" ]]; then
+        ADMIN_PASSWORD=$(grep "^Admin Password:" "$SECRETS_FILE" | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        if [[ -n "$ADMIN_PASSWORD" ]]; then
+            log "Read Admin password from $SECRETS_FILE"
+        fi
+    fi
+    
+    # Try to read LDAP Auth service account password if it exists
+    if [[ -z "$RADIUS_SERVICE_PASSWORD" ]]; then
+        RADIUS_SERVICE_PASSWORD=$(grep "^LDAP Auth Service Account Password:" "$SECRETS_FILE" | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        if [[ -n "$RADIUS_SERVICE_PASSWORD" ]]; then
+            log "Read LDAP Auth service account password from $SECRETS_FILE"
         fi
     fi
     
@@ -162,17 +176,162 @@ read_secrets_file() {
 }
 
 prompt_for_passwords() {
-    if [[ -z "$DM_PASSWORD" ]]; then
-        log "Directory Manager password not found in $SECRETS_FILE"
-        read -s -p "Enter Directory Manager password: " DM_PASSWORD
+    if [[ -z "$ADMIN_PASSWORD" ]]; then
+        log "Admin password not found in $SECRETS_FILE"
+        read -s -p "Enter Admin password: " ADMIN_PASSWORD
         echo
-        [[ -z "$DM_PASSWORD" ]] && error_exit "Directory Manager password is required"
+        [[ -z "$ADMIN_PASSWORD" ]] && error_exit "Admin password is required"
+    fi
+    
+    if [[ -z "$RADIUS_SERVICE_PASSWORD" ]]; then
+        log "ERROR: LDAP Auth service account password not found in $SECRETS_FILE"
+        log "This password should have been created during FreeIPA installation."
+        log "Please ensure you ran install-ipa.sh first, or provide the password manually."
+        read -s -p "Enter ldapauth service account password: " RADIUS_SERVICE_PASSWORD
+        echo
+        [[ -z "$RADIUS_SERVICE_PASSWORD" ]] && error_exit "LDAP Auth service account password is required"
     fi
     
     if [[ -z "$RADIUS_SECRET" ]]; then
         RADIUS_SECRET=$(generate_password)
         log "Generated RADIUS client secret: $RADIUS_SECRET"
     fi
+}
+
+# --- Service Account Verification ---
+
+verify_or_create_ldapauth_account() {
+    log "Checking for ldapauth service account..."
+    
+    local service_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    
+    # Get Kerberos ticket as admin
+    echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" || error_exit "Failed to get Kerberos ticket"
+    
+    # Check if service account exists
+    if ldapsearch -Y GSSAPI -H ldap://"$IPA_FQDN" -b "$service_dn" "(objectclass=*)" dn 2>/dev/null | grep -q "^dn: "; then
+        log "✓ ldapauth service account exists"
+        
+        # Check if password is in secrets file
+        if [[ -n "$RADIUS_SERVICE_PASSWORD" ]]; then
+            log "Found password in $SECRETS_FILE, verifying..."
+            
+            # Verify password works
+            if ldapsearch -x -D "$service_dn" -w "$RADIUS_SERVICE_PASSWORD" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
+                log "✓ Password from $SECRETS_FILE is valid"
+            else
+                log "ERROR: Password from $SECRETS_FILE does not work"
+                read -s -p "Enter the ldapauth service account password: " RADIUS_SERVICE_PASSWORD
+                echo
+                
+                # Verify the provided password
+                if ldapsearch -x -D "$service_dn" -w "$RADIUS_SERVICE_PASSWORD" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
+                    log "✓ Provided password is valid"
+                    
+                    # Update secrets file with correct password
+                    if grep -q "^LDAP Auth Service Account Password:" "$SECRETS_FILE" 2>/dev/null; then
+                        sed -i "s/^LDAP Auth Service Account Password:.*/LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD/" "$SECRETS_FILE"
+                    else
+                        echo "LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD" >> "$SECRETS_FILE"
+                    fi
+                    log "✓ Updated password in $SECRETS_FILE"
+                else
+                    kdestroy 2>/dev/null || true
+                    error_exit "Invalid password. Cannot proceed."
+                fi
+            fi
+        else
+            # Password not in secrets file, prompt user
+            log "Password not found in $SECRETS_FILE"
+            read -s -p "Enter the ldapauth service account password: " RADIUS_SERVICE_PASSWORD
+            echo
+            
+            # Verify the provided password
+            if ldapsearch -x -D "$service_dn" -w "$RADIUS_SERVICE_PASSWORD" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
+                log "✓ Password verified successfully"
+                
+                # Save to secrets file
+                if [[ -f "$SECRETS_FILE" ]]; then
+                    echo "" >> "$SECRETS_FILE"
+                    echo "LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD" >> "$SECRETS_FILE"
+                    log "✓ Saved password to $SECRETS_FILE"
+                fi
+            else
+                kdestroy 2>/dev/null || true
+                error_exit "Invalid password. Cannot proceed."
+            fi
+        fi
+    else
+        # Account doesn't exist, create it
+        log "ldapauth service account not found, creating it..."
+        
+        RADIUS_SERVICE_PASSWORD=$(generate_password)
+        
+        # Create LDIF for service account
+        cat > /tmp/ldapauth.ldif << EOF
+dn: $service_dn
+objectClass: account
+objectClass: simplesecurityobject
+uid: ldapauth
+userPassword: $RADIUS_SERVICE_PASSWORD
+description: LDAP authentication service account for FreeRADIUS and other services
+EOF
+        
+        # Add service account
+        if ldapadd -Y GSSAPI -H ldap://"$IPA_FQDN" -f /tmp/ldapauth.ldif; then
+            rm -f /tmp/ldapauth.ldif
+            log "✓ Service account 'ldapauth' created successfully"
+            log "Password: $RADIUS_SERVICE_PASSWORD"
+            
+            # Add ACI to allow ldapauth to read ipaNTHash attribute for RADIUS authentication
+            log "Adding permission for ldapauth to read ipaNTHash attribute..."
+            local users_dn="cn=users,cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
+            local aci_name="RADIUS Service Account ipaNTHash Access"
+            local aci_value="(targetattr=\"ipaNTHash\")(version 3.0; acl \"$aci_name\"; allow (read,search,compare) userdn=\"ldap:///$service_dn\";)"
+            
+            # Create LDIF to add ACI
+            cat > /tmp/ldapauth_aci.ldif << EOF
+dn: $users_dn
+changetype: modify
+add: aci
+aci: $aci_value
+EOF
+            
+            if ldapmodify -Y GSSAPI -H ldap://"$IPA_FQDN" -f /tmp/ldapauth_aci.ldif 2>/dev/null; then
+                log "✓ Permission granted for ldapauth to read ipaNTHash"
+            else
+                log "WARNING: Could not add ACI for ipaNTHash access (may already exist)"
+            fi
+            rm -f /tmp/ldapauth_aci.ldif
+            
+            # Verify service account can bind
+            if ldapsearch -x -D "$service_dn" -w "$RADIUS_SERVICE_PASSWORD" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
+                log "✓ Service account authentication verified"
+            else
+                log "WARNING: Could not verify service account authentication"
+            fi
+            
+            # Save password to secrets file
+            if [[ -f "$SECRETS_FILE" ]]; then
+                if grep -q "^LDAP Auth Service Account Password:" "$SECRETS_FILE" 2>/dev/null; then
+                    sed -i "s/^LDAP Auth Service Account Password:.*/LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD/" "$SECRETS_FILE"
+                else
+                    echo "" >> "$SECRETS_FILE"
+                    echo "LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD" >> "$SECRETS_FILE"
+                fi
+                log "✓ Password saved to $SECRETS_FILE"
+            else
+                log "WARNING: $SECRETS_FILE not found, password not saved"
+            fi
+        else
+            rm -f /tmp/ldapauth.ldif
+            kdestroy 2>/dev/null || true
+            error_exit "Failed to create ldapauth service account"
+        fi
+    fi
+    
+    # Destroy kerberos ticket
+    kdestroy 2>/dev/null || true
 }
 
 # --- Firewall Configuration ---
@@ -198,28 +357,24 @@ configure_firewall() {
 configure_radius_ldap() {
     local ldap_config="/etc/raddb/mods-available/ipa-ldap"
     local base_dn="cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
+    local service_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
 
     log "Configuring FreeRADIUS IPA LDAP module..."
 
     # Generate complete IPA LDAP configuration file
-    cat > "$ldap_config" << 'LDAPEOF'
+    cat > "$ldap_config" << LDAPEOF
 # -*- text -*-
 #
 #  FreeRADIUS LDAP module configuration for FreeIPA
+#  Using service account: ldapauth
 #
 
 ldap {
     server = '127.0.0.1'
     port = 389
     
-    identity = 'cn=Directory Manager'
-LDAPEOF
-
-    # Add password (with variable expansion)
-    echo "    password = '$DM_PASSWORD'" >> "$ldap_config"
-    
-    # Continue with rest of config
-    cat >> "$ldap_config" << LDAPEOF2
+    identity = '$service_dn'
+    password = '$RADIUS_SERVICE_PASSWORD'
     
     base_dn = '$base_dn'
     
@@ -330,10 +485,10 @@ LDAPEOF
         idle_timeout = 60
     }
 }
-LDAPEOF2
+LDAPEOF
 
     # Enable IPA LDAP module with symlink
-    ln -sf /etc/raddb/mods-available/ipa-ldap /etc/raddb/mods-enabled/ipa-ldap
+    ln -sf /etc/raddb/mods-available/ipa-ldap /etc/raddb/mods-enabled/ldap
     
     log "IPA LDAP module configured successfully"
 }
@@ -572,29 +727,32 @@ configure_freeradius() {
 save_radius_secrets() {
     local secrets_file="$SECRETS_FILE"
     
-    # Update or append RADIUS secret to /etc/ipa/secrets
+    # Update or append RADIUS secrets to /etc/ipa/secrets
     if [[ -f "$secrets_file" ]]; then
-        # Check if RADIUS secret already exists
+        # Note: LDAP Auth Service Account Password should already be in the file
+        # We just need to add/update the RADIUS client secret
+        
+        # Check if RADIUS client secret already exists
         if grep -q "^RADIUS Client Secret:" "$secrets_file"; then
             # Update existing entry
             sed -i "s/^RADIUS Client Secret:.*/RADIUS Client Secret: $RADIUS_SECRET/" "$secrets_file"
-            log "Updated RADIUS secret in $secrets_file"
         else
             # Append new entry
             echo "" >> "$secrets_file"
             echo "RADIUS Client Secret: $RADIUS_SECRET" >> "$secrets_file"
-            log "Added RADIUS secret to $secrets_file"
         fi
+        log "Updated RADIUS client secret in $secrets_file"
     else
-        # Create new secrets file
+        # Create new secrets file (shouldn't happen, but handle it)
         cat > "$secrets_file" << EOF
 # FreeRADIUS Installation Secrets
 # Generated on: $(date)
 
+LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD
 RADIUS Client Secret: $RADIUS_SECRET
 EOF
         chmod 600 "$secrets_file"
-        log "Created $secrets_file with RADIUS secret"
+        log "Created $secrets_file with RADIUS secrets"
     fi
     
     # Also save to log file location
@@ -605,6 +763,8 @@ FQDN: $IPA_FQDN
 Domain: $IPA_DOMAIN
 Realm: $IPA_REALM
 
+Service Account: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}
+Service Account Password: $RADIUS_SERVICE_PASSWORD
 RADIUS Client Secret: $RADIUS_SECRET
 
 Log file: $LOG_FILE
@@ -616,10 +776,10 @@ EOF
 # --- Argument Parsing ---
 
 parse_arguments() {
-    while getopts "d:s:?" opt; do
+    while getopts "p:s:?" opt; do
         case $opt in
-            d)
-                DM_PASSWORD="$OPTARG"
+            p)
+                ADMIN_PASSWORD="$OPTARG"
                 ;;
             s)
                 RADIUS_SECRET="$OPTARG"
@@ -643,7 +803,7 @@ show_configuration_summary() {
     log "FQDN: $IPA_FQDN"
     log "Domain: $IPA_DOMAIN"
     log "Realm: $IPA_REALM"
-    log "Directory Manager Password: $DM_PASSWORD"
+    log "Service Account: ldapauth"
     log "RADIUS Client Secret: $RADIUS_SECRET"
     log "Log File: $LOG_FILE"
     log "=============================================="
@@ -674,6 +834,9 @@ main() {
     # Show configuration
     show_configuration_summary
     
+    # Verify or create ldapauth service account in FreeIPA
+    verify_or_create_ldapauth_account
+    
     # Install FreeRADIUS packages
     local packages=("freeradius" "freeradius-ldap" "freeradius-krb5" "freeradius-utils")
     install_packages "${packages[@]}"
@@ -689,7 +852,10 @@ main() {
     
     log "=== Installation Complete ==="
     log "FreeRADIUS is now running and configured for FreeIPA"
-    log "RADIUS client secret: $RADIUS_SECRET"
+    log ""
+    log "Service Account: ldapauth"
+    log "Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    log "RADIUS Client Secret: $RADIUS_SECRET"
     log "All secrets saved to: $SECRETS_FILE"
     log "Installation log: $LOG_FILE"
     log ""
