@@ -157,3 +157,16 @@ azure_sync.conf
 # Local development
 dev-config/
 test-data/
+
+# Keycloak deployment files
+keycloak/.env
+keycloak/*.env
+!keycloak/.env.example
+keycloak/logs/
+keycloak/*.log
+keycloak/backups/
+keycloak/*.sql
+keycloak/.docker/
+keycloak/docker-compose.override.yml
+
+azure_sync.conf
