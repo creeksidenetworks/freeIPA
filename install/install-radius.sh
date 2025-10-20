@@ -729,15 +729,37 @@ save_radius_secrets() {
     
     # Update or append RADIUS secrets to /etc/ipa/secrets
     if [[ -f "$secrets_file" ]]; then
-        # Note: LDAP Auth Service Account Password should already be in the file
-        # We just need to add/update the RADIUS client secret
+        # Update Admin Password if provided/entered
+        if [[ -n "$ADMIN_PASSWORD" ]]; then
+            if grep -q "^Admin Password:" "$secrets_file"; then
+                sed -i "s/^Admin Password:.*/Admin Password: $ADMIN_PASSWORD/" "$secrets_file"
+            else
+                # Add after Directory Manager Password or at the end
+                if grep -q "^Directory Manager Password:" "$secrets_file"; then
+                    sed -i "/^Directory Manager Password:/a Admin Password: $ADMIN_PASSWORD" "$secrets_file"
+                else
+                    echo "Admin Password: $ADMIN_PASSWORD" >> "$secrets_file"
+                fi
+            fi
+            log "Updated Admin password in $secrets_file"
+        fi
         
-        # Check if RADIUS client secret already exists
+        # Update LDAP Auth Service Account Password if provided/entered
+        if [[ -n "$RADIUS_SERVICE_PASSWORD" ]]; then
+            if grep -q "^LDAP Auth Service Account Password:" "$secrets_file"; then
+                sed -i "s/^LDAP Auth Service Account Password:.*/LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD/" "$secrets_file"
+            else
+                echo "" >> "$secrets_file"
+                echo "LDAP Auth Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}" >> "$secrets_file"
+                echo "LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD" >> "$secrets_file"
+            fi
+            log "Updated LDAP Auth password in $secrets_file"
+        fi
+        
+        # Update RADIUS client secret
         if grep -q "^RADIUS Client Secret:" "$secrets_file"; then
-            # Update existing entry
             sed -i "s/^RADIUS Client Secret:.*/RADIUS Client Secret: $RADIUS_SECRET/" "$secrets_file"
         else
-            # Append new entry
             echo "" >> "$secrets_file"
             echo "RADIUS Client Secret: $RADIUS_SECRET" >> "$secrets_file"
         fi
@@ -748,6 +770,8 @@ save_radius_secrets() {
 # FreeRADIUS Installation Secrets
 # Generated on: $(date)
 
+Admin Password: $ADMIN_PASSWORD
+LDAP Auth Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}
 LDAP Auth Service Account Password: $RADIUS_SERVICE_PASSWORD
 RADIUS Client Secret: $RADIUS_SECRET
 EOF

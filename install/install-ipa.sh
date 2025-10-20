@@ -496,6 +496,8 @@ join_ipa_domain() {
         read -s -p "Enter the admin password for domain join: " admin_password
         echo
         [[ -z "$admin_password" ]] && error_exit "Admin password is required"
+        # Update global variable so it can be saved to secrets file
+        ADMIN_PASSWORD="$admin_password"
     fi
     
     # Join the domain
@@ -768,25 +770,25 @@ save_passwords() {
         dm_pass_note="$DM_PASSWORD"
     fi
     
+    # Build ldapauth DN
+    local ldapauth_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    
     # Save secrets to /etc/ipa/secrets
     cat > "$secrets_file" << EOF
 # FreeIPA Installation Secrets
 # Generated on: $(date)
-# FQDN: $IPA_FQDN
-# Domain: $IPA_DOMAIN
-# Realm: $IPA_REALM
 
 Directory Manager Password: $dm_pass_note
 Admin Password: $ADMIN_PASSWORD
-
-Log file: $LOG_FILE
 EOF
 
-    # Append ldapauth password if it was created
+    # Append ldapauth information if it was created
     if [[ -f /tmp/ipa-install-secrets/ldapauth_password ]]; then
+        echo "" >> "$secrets_file"
+        echo "LDAP Auth Service Account DN: $ldapauth_dn" >> "$secrets_file"
         cat /tmp/ipa-install-secrets/ldapauth_password >> "$secrets_file"
         rm -rf /tmp/ipa-install-secrets
-        log "Added ldapauth service account password to secrets file"
+        log "Added ldapauth service account information to secrets file"
     fi
     
     chmod 600 "$secrets_file"
