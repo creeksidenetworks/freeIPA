@@ -1,0 +1,63 @@
+# Azure Entra ID to FreeIPA Sync Configuration
+# Copy this file to azure_sync.conf and configure with your values
+# Ensure file permissions are 600 for security: chmod 600 azure_sync.conf
+
+[azure]
+# Azure App Registration details (required)
+client_id=your-client-id-here
+client_secret=your-client-secret-here
+tenant_id=your-tenant-id-here
+
+# Optional: Specific groups to sync (comma-separated)
+# If empty, all groups will be synced
+sync_groups=
+
+# Optional: User filter (e.g., only sync users from specific domains)
+user_filter=
+
+[freeipa]
+# FreeIPA server configuration (required)
+server=ipa.yourdomain.com
+domain=yourdomain.com
+realm=YOURDOMAIN.COM
+
+# FreeIPA admin credentials for API access (required)
+admin_user=admin
+admin_password=your-freeipa-admin-password
+
+# SSL verification (set to false for self-signed certificates)
+verify_ssl=true
+
+# Default settings for new users
+default_shell=/bin/bash
+default_home_base=/home
+
+# Password policy for new users
+temp_password_length=12
+password_expiry_days=30
+
+[sync]
+# Sync behavior settings
+dry_run=false
+log_level=INFO
+log_file=/var/log/azure_freeipa_sync.log
+
+# Backup settings (optional)
+backup_enabled=false
+backup_directory=/var/backups/freeipa-sync
+
+# Performance settings
+batch_size=50
+max_retries=3
+retry_delay=5
+
+[mapping]
+# Azure to FreeIPA attribute mapping
+# Format: azure_attribute=freeipa_attribute
+givenName=givenname
+surname=sn
+userPrincipalName=uid
+mail=mail
+department=departmentnumber
+jobTitle=title
+telephoneNumber=telephonenumber

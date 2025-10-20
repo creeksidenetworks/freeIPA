@@ -17,6 +17,10 @@ Version: 1.0.0
 
 import os
 import sys
+
+# Ensure system packages are preferred for FreeIPA compatibility
+sys.path.insert(0, '/usr/lib64/python3.9/site-packages')
+sys.path.insert(0, '/usr/lib/python3.9/site-packages')
 import json
 import logging
 import secrets
@@ -24,9 +28,14 @@ import string
 import configparser
 import argparse
 import time
+import warnings
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+
+# Suppress SSL warnings for self-signed certificates
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Third-party imports
 try:
@@ -79,14 +88,27 @@ class AzureFreeIPASync:
             os.makedirs(log_dir, exist_ok=True)
         
         # Configure logging
-        logging.basicConfig(
-            level=getattr(logging, log_level.upper()),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
-        )
+        # Create formatters
+        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_formatter = logging.Formatter('%(asctime)s - %(message)s')
+        
+        # Create handlers
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(file_formatter)
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(console_formatter)
+        
+        # Configure root logger
+        root_logger = logging.getLogger()
+        root_logger.setLevel(getattr(logging, log_level.upper()))
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
+        
+        # Reduce verbosity of third-party libraries
+        logging.getLogger('python_freeipa.client').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+        logging.getLogger('requests').setLevel(logging.WARNING)
         
         self.logger = logging.getLogger(__name__)
     
@@ -130,9 +152,10 @@ class AzureFreeIPASync:
             server = self.config.get('freeipa', 'server').strip('"')
             admin_user = self.config.get('freeipa', 'admin_user').strip('"')
             admin_password = self.config.get('freeipa', 'admin_password').strip('"')
+            verify_ssl = self.config.getboolean('freeipa', 'verify_ssl', fallback=True)
             
             # Initialize FreeIPA client
-            self.freeipa_client = ClientMeta(server, verify_ssl=True)
+            self.freeipa_client = ClientMeta(server, verify_ssl=verify_ssl)
             self.freeipa_client.login(admin_user, admin_password)
             
             self.logger.info("Successfully connected to FreeIPA")
@@ -282,26 +305,26 @@ class AzureFreeIPASync:
         """Sync a single user from Azure to FreeIPA."""
         try:
             freeipa_attrs = self._map_azure_to_freeipa_attributes(azure_user)
-            uid = freeipa_attrs['uid']
+            uid = freeipa_attrs.get('uid')
+            
+            if not uid:
+                self.logger.error(f"No UID found for user: {azure_user.get('userPrincipalName', 'Unknown')}")
+                return False
             
             # Check if user exists in FreeIPA
             try:
                 existing_user = self.freeipa_client.user_show(uid)
-                # User exists, update if needed
-                self.logger.info(f"User {uid} already exists, updating...")
-                
-                # Update user attributes (excluding password)
-                update_attrs = {k: v for k, v in freeipa_attrs.items() 
-                              if k not in ['uid', 'userpassword']}
-                
-                if update_attrs:
-                    self.freeipa_client.user_mod(uid, **update_attrs)
-                    self.stats['users_updated'] += 1
-                    self.logger.info(f"Updated user: {uid}")
+                # User exists, skip updates but continue for group membership
+                self.logger.info(f"User {uid} already exists, skipping user updates")
                 
                 return True
                 
-            except Exception:
+            except Exception as e:
+                # Check if this is actually a "user not found" error
+                if "not found" not in str(e).lower():
+                    self.logger.error(f"Error checking user {uid}: {e}")
+                    return False
+                    
                 # User doesn't exist, create new user
                 self.logger.info(f"Creating new user: {uid}")
                 
@@ -312,11 +335,33 @@ class AzureFreeIPASync:
                 # Set password expiration
                 expiry_days = int(self.config.get('freeipa', 'password_expiry_days', fallback='30'))
                 
-                # Create user
-                self.freeipa_client.user_add(uid, **freeipa_attrs)
+                # Extract required positional parameters for user_add
+                o_givenname = freeipa_attrs.get('givenname', azure_user.get('givenName', ''))
+                o_sn = freeipa_attrs.get('sn', azure_user.get('surname', ''))
+                o_cn = azure_user.get('displayName', f"{o_givenname} {o_sn}").strip()
                 
-                # Force password change on first login
-                self.freeipa_client.user_mod(uid, passwordexpiration=(datetime.now() + timedelta(days=expiry_days)).strftime('%Y%m%d%H%M%SZ'))
+                # Ensure we have minimum required data
+                if not o_givenname:
+                    o_givenname = uid  # fallback to username
+                if not o_sn:
+                    o_sn = uid  # fallback to username
+                if not o_cn:
+                    o_cn = f"{o_givenname} {o_sn}"
+                
+                # Remove from freeipa_attrs as they're positional parameters
+                freeipa_attrs.pop('givenname', None)
+                freeipa_attrs.pop('sn', None)
+                freeipa_attrs.pop('uid', None)  # Remove uid as it's the first positional parameter
+                
+                # Create user with required positional parameters
+                self.freeipa_client.user_add(uid, o_givenname, o_sn, o_cn, **freeipa_attrs)
+                
+                # Set password expiration (use krbpasswordexpiration for FreeIPA)
+                expiry_date = (datetime.now() + timedelta(days=expiry_days)).strftime('%Y%m%d%H%M%SZ')
+                try:
+                    self.freeipa_client.user_mod(uid, krbpasswordexpiration=expiry_date)
+                except Exception as e:
+                    self.logger.warning(f"Could not set password expiration for {uid}: {e}")
                 
                 self.stats['users_created'] += 1
                 self.logger.info(f"Created user {uid} with temporary password: {temp_password}")

@@ -8,9 +8,5 @@ requests>=2.28.0
 # FreeIPA Python client
 python-freeipa>=1.0.8
 
-# Configuration and utilities
+# Configuration utilities
 configparser>=5.3.0
-
-# Additional dependencies for Rocky Linux 9
-cryptography>=40.0.0
-urllib3>=1.26.0

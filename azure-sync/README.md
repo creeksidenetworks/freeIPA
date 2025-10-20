@@ -1,41 +1,167 @@
-# Azure Entra ID to FreeIPA Sync
+# Azure FreeIPA Sync
 
-A comprehensive synchronization tool that syncs users and groups from Azure Entra ID (formerly Azure AD) to FreeIPA, designed specifically for Rocky Linux 9 environments.
+A simple, reliable tool to synchronize users and groups from Azure Entra ID (formerly Azure Active Directory) to FreeIPA.
 
 ## Features
 
-- **User Synchronization**: Automatically sync users from Azure Entra ID to FreeIPA
-- **Group Synchronization**: Sync groups and group memberships
-- **Temporary Passwords**: Generate secure temporary passwords for new users
-- **Configurable Mapping**: Map Azure attributes to FreeIPA attributes
-- **Backup Support**: Automatic backup before sync operations
-- **Systemd Integration**: Run as a service with timer support for scheduled syncing
-- **Comprehensive Logging**: Detailed logging with log rotation
-- **Dry Run Mode**: Test sync operations without making changes
-- **Security-First**: Secure configuration and password handling
+- ✅ **User Sync**: Creates new users from Azure, preserves existing users
+- ✅ **Group Sync**: Synchronizes group memberships 
+- ✅ **Safe Operation**: Dry-run mode, preserves existing user data
+- ✅ **Flexible Configuration**: Customizable attribute mapping
+- ✅ **Production Ready**: Logging, error handling, SSL support
 
 ## Quick Start
 
+### 1. Installation
+
 ```bash
-# 1. Clone and install
-git clone https://github.com/creeksidenetworks/freeIPA.git
-cd freeIPA
-make install
+# Clone or download the project
+git clone <repository-url>
+cd azure-sync
 
-# 2. Configure Azure credentials
-sudo nano /etc/azure_sync.conf
-
-# 3. Test configuration
-make test
-
-# 4. Enable automatic sync
-sudo systemctl enable --now azure-freeipa-sync.timer
-
-# 5. Monitor status
-make monitor
+# Install dependencies and configure
+sudo ./install.sh
 ```
 
-> See [SETUP.md](SETUP.md) for detailed installation instructions.
+### 2. Configuration
+
+```bash
+# Copy example configuration
+sudo cp /etc/azure-freeipa-sync/azure_sync.conf.example /etc/azure-freeipa-sync/azure_sync.conf
+
+# Edit configuration
+sudo nano /etc/azure-freeipa-sync/azure_sync.conf
+```
+
+### 3. Required Configuration
+
+Update these sections in `azure_sync.conf`:
+
+```ini
+[azure]
+client_id=your-azure-app-client-id
+client_secret=your-azure-app-client-secret  
+tenant_id=your-azure-tenant-id
+
+[freeipa]
+server=ipa.yourdomain.com
+domain=yourdomain.com
+realm=YOURDOMAIN.COM
+admin_user=admin
+admin_password=your-freeipa-admin-password
+```
+
+### 4. Test Configuration
+
+```bash
+# Test with dry-run (no changes made)
+azure-freeipa-sync --dry-run -c /etc/azure-freeipa-sync/azure_sync.conf
+```
+
+### 5. Run Sync
+
+```bash
+# Perform actual sync
+azure-freeipa-sync -c /etc/azure-freeipa-sync/azure_sync.conf
+```
+
+## Azure App Registration
+
+Create an Azure App Registration with these permissions:
+
+- `User.Read.All` (Application permission)
+- `Group.Read.All` (Application permission)
+- `Directory.Read.All` (Application permission)
+
+## Usage Examples
+
+```bash
+# Dry run with verbose logging
+azure-freeipa-sync --dry-run --verbose -c /etc/azure-freeipa-sync/azure_sync.conf
+
+# Sync with custom config file
+azure-freeipa-sync -c /path/to/custom/config.conf
+
+# View help
+azure-freeipa-sync --help
+```
+
+## Configuration Options
+
+### Azure Section
+- `client_id`: Azure App Registration Client ID
+- `client_secret`: Azure App Registration Client Secret
+- `tenant_id`: Azure Tenant ID
+- `sync_groups`: Comma-separated list of specific groups to sync (optional)
+
+### FreeIPA Section  
+- `server`: FreeIPA server hostname
+- `domain`: FreeIPA domain
+- `realm`: Kerberos realm (usually uppercase domain)
+- `admin_user`: FreeIPA admin username
+- `admin_password`: FreeIPA admin password
+- `verify_ssl`: Set to `false` for self-signed certificates
+
+### Sync Section
+- `log_level`: Logging level (DEBUG, INFO, WARNING, ERROR)
+- `log_file`: Path to log file
+- `dry_run`: Default mode (true/false)
+
+## Scheduling
+
+To run sync automatically, create a cron job:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add daily sync at 2 AM
+0 2 * * * /usr/local/bin/azure-freeipa-sync -c /etc/azure-freeipa-sync/azure_sync.conf >/dev/null 2>&1
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **SSL Certificate Errors**: Set `verify_ssl=false` for self-signed certificates
+2. **Permission Errors**: Ensure Azure app has required permissions
+3. **Authentication Failures**: Verify FreeIPA admin credentials
+
+### Logs
+
+Check logs for detailed information:
+```bash
+tail -f /var/log/azure_freeipa_sync.log
+```
+
+## File Structure
+
+```
+azure-sync/
+├── azure_freeipa_sync.py      # Main sync script
+├── azure_sync.conf.example    # Configuration template
+├── install.sh                 # Installation script
+├── requirements.txt           # Python dependencies
+└── README.md                 # This file
+```
+
+## Security
+
+- Store configuration files with restricted permissions: `chmod 600 azure_sync.conf`
+- Use dedicated service accounts for both Azure and FreeIPA
+- Regularly rotate credentials
+- Review logs for unauthorized access attempts
+
+## License
+
+[Specify your license here]
+
+## Support
+
+For issues and questions:
+- Check logs: `/var/log/azure_freeipa_sync.log`
+- Review configuration: `/etc/azure-freeipa-sync/azure_sync.conf`
+- Test with `--dry-run` flag first
 
 ## Prerequisites
 
