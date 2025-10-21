@@ -58,8 +58,8 @@
       "federationProviderDisplayName": "freeipa-ldap",
       "federationMapperType": "user-attribute-ldap-mapper",
       "config": {
-        "ldap.attribute": ["givenName"],
-        "user.model.attribute": ["firstName"]
+        "ldap.attribute": "givenName",
+        "user.model.attribute": "firstName"
       }
     },
     {
@@ -67,8 +67,8 @@
       "federationProviderDisplayName": "freeipa-ldap",
       "federationMapperType": "user-attribute-ldap-mapper",
       "config": {
-        "ldap.attribute": ["sn"],
-        "user.model.attribute": ["lastName"]
+        "ldap.attribute": "sn",
+        "user.model.attribute": "lastName"
       }
     },
     {
@@ -76,8 +76,8 @@
       "federationProviderDisplayName": "freeipa-ldap",
       "federationMapperType": "user-attribute-ldap-mapper",
       "config": {
-        "ldap.attribute": ["mail"],
-        "user.model.attribute": ["email"]
+        "ldap.attribute": "mail",
+        "user.model.attribute": "email"
       }
     }
   ],

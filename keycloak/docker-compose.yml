@@ -4,10 +4,10 @@ services:
     container_name: keycloak-postgres
     environment:
       POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: keycloak_db_password_change_me
+      POSTGRES_USER: ${KC_DB_USERNAME}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data
     networks:
       - keycloak-network
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
       # Database configuration
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: keycloak
+      KC_DB_USERNAME: ${KC_DB_USERNAME}
       KC_DB_PASSWORD: ${KC_DB_PASSWORD}
       
       # Keycloak admin user
@@ -37,13 +37,10 @@ services:
       KC_HOSTNAME_STRICT: false
       KC_HOSTNAME_STRICT_HTTPS: false
       
-      # HTTP configuration (development mode)
+      # HTTP configuration (production mode)
       KC_HTTP_ENABLED: true
       KC_HTTP_PORT: 8080
-      
-      # Health and metrics
-      KC_HEALTH_ENABLED: true
-      KC_METRICS_ENABLED: true
+      KC_PROXY: edge
       
       # Logging
       KC_LOG_LEVEL: INFO
@@ -61,7 +58,7 @@ services:
       - ./config/providers:/opt/keycloak/providers
       - ./config/realms:/opt/keycloak/data/import
     command: 
-      - start-dev
+      - start
       - --import-realm
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
