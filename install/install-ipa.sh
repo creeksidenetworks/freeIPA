@@ -177,17 +177,26 @@ check_and_configure_static_ip() {
         
         log "Active connection: $connection_name"
         
+        # Check if connection name matches interface name
+        if [[ "$connection_name" != "$interface" ]]; then
+            log "Connection name '$connection_name' does not match interface name '$interface'"
+            log "Renaming connection to match interface..."
+            
+            # Rename the connection to match the interface
+            if nmcli connection modify "$connection_name" connection.id "$interface"; then
+                log "✓ Connection renamed from '$connection_name' to '$interface'"
+                connection_name="$interface"
+            else
+                log "WARNING: Failed to rename connection, continuing with current name: $connection_name"
+            fi
+        fi
+        
         # Check if DHCP is enabled (ipv4.method)
         local ipv4_method=$(nmcli -t -f ipv4.method connection show "$connection_name" | cut -d: -f2)
         
         if [[ "$ipv4_method" == "auto" || "$ipv4_method" == "dhcp" ]]; then
             log "WARNING: Interface $interface is configured for DHCP"
             log "FreeIPA requires a static IP address"
-            
-            read -p "Convert $interface to static IP ($current_ip)? [y/N]: " confirm
-            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-                error_exit "Static IP is required for FreeIPA installation. Exiting."
-            fi
             
             # Get current network configuration
             local gateway=$(ip route | grep "^default" | grep "$interface" | awk '{print $3}' | head -1)
@@ -197,26 +206,63 @@ check_and_configure_static_ip() {
             # If no DNS servers configured, use common defaults
             if [[ -z "$dns_servers" ]]; then
                 dns_servers="8.8.8.8 8.8.4.4"
-                log "No DNS servers found, using: $dns_servers"
             fi
             
-            log "Converting to static IP configuration:"
+            # Display current configuration and ask for confirmation
+            log ""
+            log "=========================================="
+            log "Current Network Configuration (DHCP):"
+            log "  Interface: $interface"
+            log "  Connection: $connection_name"
             log "  IP Address: $current_ip/$prefix"
-            log "  Gateway: $gateway"
-            log "  DNS: $dns_servers"
+            log "  Gateway: ${gateway:-<not set>}"
+            log "  DNS Servers: $dns_servers"
+            log "=========================================="
+            log ""
+            log "This configuration will be converted to STATIC IP with the same settings."
+            log ""
             
-            # Modify connection to use static IP
-            nmcli connection modify "$connection_name" \
-                ipv4.method manual \
-                ipv4.addresses "$current_ip/$prefix" \
-                ipv4.gateway "$gateway" \
-                ipv4.dns "$dns_servers" || error_exit "Failed to configure static IP"
+            read -p "Do you want to proceed with converting $interface from DHCP to static IP? [y/N]: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                error_exit "Static IP is required for FreeIPA installation. Exiting."
+            fi
+            
+            log "Converting to static IP configuration..."
+            
+            # Build the nmcli command arguments
+            local modify_args=(
+                "connection" "modify" "$connection_name"
+                "ipv4.method" "manual"
+                "ipv4.addresses" "$current_ip/$prefix"
+            )
+            
+            # Add gateway if available
+            if [[ -n "$gateway" ]]; then
+                modify_args+=("ipv4.gateway" "$gateway")
+            fi
+            
+            # Add DNS servers
+            modify_args+=("ipv4.dns" "$dns_servers")
+            
+            # Apply configuration
+            if nmcli "${modify_args[@]}"; then
+                log "✓ Configuration updated successfully"
+            else
+                error_exit "Failed to configure static IP with nmcli"
+            fi
             
             # Bring connection down and up to apply changes
             log "Applying network configuration changes..."
+            log "  - Bringing connection down..."
             nmcli connection down "$connection_name" >/dev/null 2>&1 || true
             sleep 2
-            nmcli connection up "$connection_name" || error_exit "Failed to bring up connection with static IP"
+            
+            log "  - Bringing connection up..."
+            if nmcli connection up "$connection_name"; then
+                log "  ✓ Connection activated successfully"
+            else
+                error_exit "Failed to bring up connection with static IP"
+            fi
             
             # Wait for network to stabilize
             log "Waiting for network to stabilize..."
@@ -228,7 +274,14 @@ check_and_configure_static_ip() {
                 error_exit "IP address changed after converting to static ($current_ip -> $new_ip). Please check network configuration."
             fi
             
-            log "✓ Successfully converted to static IP: $current_ip"
+            # Verify the configuration is now static
+            local new_ipv4_method=$(nmcli -t -f ipv4.method connection show "$connection_name" | cut -d: -f2)
+            if [[ "$new_ipv4_method" == "manual" ]]; then
+                log "✓ Successfully converted to static IP: $current_ip/$prefix"
+                log "✓ Configuration verified: method=$new_ipv4_method"
+            else
+                log "WARNING: Configuration method is '$new_ipv4_method' (expected 'manual')"
+            fi
         else
             log "✓ Interface $interface is already configured with static IP ($ipv4_method)"
         fi
