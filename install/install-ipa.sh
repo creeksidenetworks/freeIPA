@@ -9,17 +9,19 @@
 # IMPORTANT: This script MUST be run with root privileges (e.g., `sudo`).
 #
 # Usage:
-#   ./install-ipa.sh -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>]
+#   ./install-ipa.sh -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>] [-f <forwarder1,forwarder2,...>]
 #
 # Arguments:
 #   -h <fqdn>        : IPA FQDN (e.g., ipa.example.com)
 #   -r              : Replica mode (default is standalone)
 #   -d <password>   : Directory Manager password (random if not provided)
 #   -p <password>   : Admin password (random if not provided)
+#   -f <forwarders> : DNS forwarders (comma-separated, e.g., 8.8.8.8,8.8.4.4)
 #
 # Example:
 #   ./install-ipa.sh -h ipa.example.com
 #   ./install-ipa.sh -h ipa2.example.com -r -p MyAdminPass123
+#   ./install-ipa.sh -h ipa.example.com -f 8.8.8.8,1.1.1.1
 # ==============================================================================
 
 set -e
@@ -33,6 +35,7 @@ IPA_REALM=""
 DM_PASSWORD=""
 ADMIN_PASSWORD=""
 REPLICA_MODE=false
+DNS_FORWARDERS=""
 
 # --- Helper Functions ---
 
@@ -59,7 +62,7 @@ validate_fqdn() {
 
 show_usage() {
     cat << EOF
-Usage: $0 -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>]
+Usage: $0 -h <fqdn> [-r] [-d <dm_password>] [-p <admin_password>] [-f <forwarders>]
 
 Arguments:
   -h <fqdn>        IPA FQDN (e.g., ipa.example.com)
@@ -67,11 +70,18 @@ Arguments:
   -d <password>   Directory Manager password (random if not provided for standalone,
                   optional for replica)
   -p <password>   Admin password (required for replica, random if not provided for standalone)
+  -f <forwarders> DNS forwarders (comma-separated, e.g., 8.8.8.8,8.8.4.4)
+                  Only applicable for standalone/primary server installation
+                  If not specified, --auto-forwarders will be used
+                  Replicas will inherit DNS forwarders from the primary server
   -?              Show this help
 
 Examples:
   # Standalone server (first IPA server)
   $0 -h ipa.example.com
+
+  # Standalone server with custom DNS forwarders
+  $0 -h ipa.example.com -f 8.8.8.8,1.1.1.1
 
   # Replica server (requires existing IPA domain)
   $0 -h ipa2.example.com -r -p AdminPassword123
@@ -88,6 +98,7 @@ Note for Replica Mode:
   - Admin password is required to join the domain
   - Directory Manager password is optional but can be stored for later use
   - The DM password is shared across all servers in the domain
+  - DNS forwarders are automatically inherited from the primary server
   - Ensure DNS can resolve the primary IPA server
 EOF
 }
@@ -219,13 +230,8 @@ check_and_configure_static_ip() {
             log "  DNS Servers: $dns_servers"
             log "=========================================="
             log ""
-            log "This configuration will be converted to STATIC IP with the same settings."
+            log "Converting $interface from DHCP to static IP..."
             log ""
-            
-            read -p "Do you want to proceed with converting $interface from DHCP to static IP? [y/N]: " confirm
-            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-                error_exit "Static IP is required for FreeIPA installation. Exiting."
-            fi
             
             log "Converting to static IP configuration..."
             
@@ -421,22 +427,84 @@ install_standalone_server() {
     configure_firewall
     
     log "Starting FreeIPA server installation..."
-    ipa-server-install \
-        --ds-password="$DM_PASSWORD" \
-        --admin-password="$ADMIN_PASSWORD" \
-        --ip-address="$primary_ip" \
-        --domain="$IPA_DOMAIN" \
-        --setup-adtrust \
-        --realm="$IPA_REALM" \
-        --hostname="$IPA_FQDN" \
-        --setup-dns \
-        --mkhomedir \
-        --allow-zone-overlap \
-        --auto-reverse \
-        --auto-forwarders \
-        --unattended || error_exit "FreeIPA installation failed"
+    
+    # Build installation command
+    local install_cmd=(
+        "ipa-server-install"
+        "--ds-password=$DM_PASSWORD"
+        "--admin-password=$ADMIN_PASSWORD"
+        "--ip-address=$primary_ip"
+        "--domain=$IPA_DOMAIN"
+        "--setup-adtrust"
+        "--realm=$IPA_REALM"
+        "--hostname=$IPA_FQDN"
+        "--setup-dns"
+        "--mkhomedir"
+        "--allow-zone-overlap"
+        "--auto-reverse"
+        "--unattended"
+    )
+    
+    # Add DNS forwarders handling
+    if [[ -n "$DNS_FORWARDERS" ]]; then
+        log "Custom DNS forwarders will be configured post-installation: $DNS_FORWARDERS"
+        # Do not pass --forwarder to installer, will configure after installation
+        install_cmd+=("--no-forwarders")
+    else
+        log "Using auto-detected DNS forwarders"
+        install_cmd+=("--auto-forwarders")
+    fi
+    
+    # Always disable DNSSEC validation to allow DNS forwarding
+    install_cmd+=("--no-dnssec-validation")
+    log "DNSSEC validation will be disabled"
+    
+    # Execute installation
+    "${install_cmd[@]}" || error_exit "FreeIPA installation failed"
     
     log "FreeIPA standalone server installation completed successfully"
+    
+    # Configure DNS forwarders post-installation
+    if [[ -n "$DNS_FORWARDERS" ]]; then
+        log "Configuring DNS forwarders post-installation..."
+        sleep 3  # Wait for services to stabilize
+        
+        # Get Kerberos ticket for admin
+        echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" >/dev/null 2>&1 || {
+            log "WARNING: Could not get Kerberos ticket to configure forwarders"
+            log "         You can manually set them with: ipa dnsconfig-mod --forwarder=<ip> --forward-policy=only"
+            return
+        }
+        
+        # Build ipa dnsconfig-mod command
+        local dnsconfig_cmd=("ipa" "dnsconfig-mod")
+        IFS=',' read -ra FORWARDERS <<< "$DNS_FORWARDERS"
+        for forwarder in "${FORWARDERS[@]}"; do
+            forwarder=$(echo "$forwarder" | xargs)  # Trim whitespace
+            [[ -n "$forwarder" ]] && dnsconfig_cmd+=("--forwarder=$forwarder")
+        done
+        
+        # Add forward policy
+        dnsconfig_cmd+=("--forward-policy=only")
+        
+        # Apply forwarders
+        if "${dnsconfig_cmd[@]}" >/dev/null 2>&1; then
+            log "✓ DNS forwarders configured: $DNS_FORWARDERS"
+            log "✓ Forward policy set to: only"
+            
+            # Verify they were set
+            local verified_forwarders=$(ipa dnsconfig-show 2>/dev/null | grep "Global forwarders:" | cut -d: -f2)
+            if [[ -n "$verified_forwarders" ]]; then
+                log "✓ Verified: Global forwarders:$verified_forwarders"
+            fi
+        else
+            log "WARNING: Failed to configure DNS forwarders post-installation"
+            log "         You can manually set them with: ipa dnsconfig-mod --forwarder=<ip> --forward-policy=only"
+        fi
+        
+        # Destroy kerberos ticket
+        kdestroy 2>/dev/null || true
+    fi
     
     # Create ldapauth service account for LDAP authentication
     create_ldapauth_service_account
@@ -713,15 +781,26 @@ Manual fix: Run the following command:
     add_ipa_servers_to_hosts
     
     log "Starting replica promotion..."
-    ipa-replica-install \
-        --setup-adtrust \
-        --setup-ca \
-        --setup-dns \
-        --mkhomedir \
-        --allow-zone-overlap \
-        --auto-reverse \
-        --auto-forwarders \
-        --unattended || error_exit "FreeIPA replica promotion failed"
+    
+    # Build replica installation command
+    local install_cmd=(
+        "ipa-replica-install"
+        "--setup-adtrust"
+        "--setup-ca"
+        "--setup-dns"
+        "--mkhomedir"
+        "--allow-zone-overlap"
+        "--auto-reverse"
+        "--unattended"
+    )
+    
+    # Note: DNS forwarders are inherited from primary server via LDAP replication
+    # We intentionally do NOT set forwarders here to maintain consistency
+    log "DNS forwarders will be inherited from the primary server"
+    install_cmd+=("--auto-forwarders")
+    
+    # Execute replica installation
+    "${install_cmd[@]}" || error_exit "FreeIPA replica promotion failed"
     
     log "Replica promotion completed successfully"
 }
@@ -729,7 +808,7 @@ Manual fix: Run the following command:
 # --- Argument Parsing ---
 
 parse_arguments() {
-    while getopts "h:rd:p:?" opt; do
+    while getopts "h:rd:p:f:?" opt; do
         case $opt in
             h)
                 IPA_FQDN="$OPTARG"
@@ -742,6 +821,9 @@ parse_arguments() {
                 ;;
             p)
                 ADMIN_PASSWORD="$OPTARG"
+                ;;
+            f)
+                DNS_FORWARDERS="$OPTARG"
                 ;;
             ?)
                 show_usage
@@ -763,6 +845,14 @@ parse_arguments() {
     
     if ! validate_fqdn "$IPA_FQDN"; then
         error_exit "Invalid FQDN format: $IPA_FQDN"
+    fi
+    
+    # Warn if DNS forwarders specified for replica mode
+    if [[ "$REPLICA_MODE" = true ]] && [[ -n "$DNS_FORWARDERS" ]]; then
+        log "WARNING: DNS forwarders (-f) specified for replica mode"
+        log "         Replicas inherit DNS forwarders from the primary server via LDAP"
+        log "         The -f option will be ignored for replica installation"
+        DNS_FORWARDERS=""
     fi
     
     # Extract domain and realm from FQDN
