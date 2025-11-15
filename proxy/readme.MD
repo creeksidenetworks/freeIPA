@@ -32,6 +32,7 @@ In NPM's web interface:
    - **Forward Port:** `443`
    - ✅ **Block Common Exploits**
    - ✅ **Websockets Support**
+   - ⚠️ **CRITICAL: DO NOT enable "Cache Assets"** - This will break sub_filter URL rewriting and cause mixed content errors
 
 3. **SSL Tab:**
    - ✅ Select or request SSL certificate for `ipa.mycompany.com`
@@ -50,6 +51,9 @@ location = / {
 }
 
 location / {
+    # CRITICAL: Disable gzip for sub_filter to work
+    gzip off;
+    
     # Set Host header to internal hostname
     proxy_set_header Host ipa.internal.lcl;
     
@@ -67,21 +71,6 @@ location / {
     
     # Cookie domain rewriting
     proxy_cookie_domain ipa.internal.lcl ipa.mycompany.com;
-    
-    # Redirect rewriting
-    proxy_redirect https://ipa.internal.lcl https://ipa.mycompany.com;
-    proxy_redirect http://ipa.internal.lcl https://ipa.mycompany.com;
-    
-    # Response body rewriting - catches JavaScript and HTML URLs
-    sub_filter 'https://ipa.internal.lcl' 'https://ipa.mycompany.com';
-    sub_filter 'http://ipa.internal.lcl' 'https://ipa.mycompany.com';
-    sub_filter '"ipa.internal.lcl"' '"ipa.mycompany.com"';
-    sub_filter "'ipa.internal.lcl'" "'ipa.mycompany.com'";
-    sub_filter_once off;
-    sub_filter_types text/html text/css text/xml text/javascript application/javascript application/json;
-    
-    # Disable compression for sub_filter to work
-    proxy_set_header Accept-Encoding "";
     
     # Timeouts
     proxy_connect_timeout 150;
@@ -103,43 +92,5 @@ location / {
 ```
 
 4. **Save** the proxy host
-
-## Configuration Explanation
-
-### Critical Settings
-
-1. **`proxy_set_header Host ipa.internal.lcl`**
-   - FreeIPA validates the Host header and needs to see its internal hostname
-   - Without this, FreeIPA will reject requests or behave incorrectly
-
-2. **`proxy_cookie_domain ipa.internal.lcl ipa.mycompany.com`**
-   - Rewrites cookies from the internal domain to the public domain
-   - Essential for session persistence and login to work
-
-3. **`proxy_redirect`**
-   - Intercepts HTTP `Location` headers in 301/302 redirects
-   - Rewrites internal URLs to public URLs
-   - Prevents browser from being redirected to internal hostname
-
-4. **`sub_filter` directives**
-   - Rewrites URLs in HTML, JavaScript, CSS, and JSON responses
-   - Catches client-side redirects like `window.location.href = '...'`
-   - Required because FreeIPA embeds URLs in JavaScript code
-
-5. **`proxy_set_header Accept-Encoding ""`**
-   - Disables gzip compression from backend
-   - CRITICAL: `sub_filter` only works on uncompressed responses
-   - Slight performance tradeoff for URL rewriting to function
-
-6. **`location = /` block**
-   - Handles root path redirect directly from nginx
-   - Prevents FreeIPA's redirect from reaching the browser
-   - Ensures browser never sees internal hostname
-
-### Buffer and Timeout Settings
-
-- **`client_max_body_size 200M`** - Allows large file uploads
-- **`proxy_buffers 4 32k`** - Handles large headers and cookies
-- **`proxy_*_timeout 100-150s`** - Accommodates slow API calls
 
 
