@@ -1,0 +1,15 @@
+---
+###############################################################################
+#                         Users Database (Backup)                             #
+###############################################################################
+# This file can be used as a backup authentication method
+# Passwords can be generated using: docker run authelia/authelia:latest authelia hash-password 'yourpassword'
+
+users:
+  # Example user - remove or update as needed
+  # admin:
+  #   displayname: "Administrator"
+  #   password: "$argon2id$v=19$m=65536,t=3,p=4$HASH_GENERATED_BY_AUTHELIA"
+  #   email: admin@innosilicon.com
+  #   groups:
+  #     - admins

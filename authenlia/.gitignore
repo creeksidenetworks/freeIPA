@@ -1,0 +1,25 @@
+# .gitignore for Authelia + NPM setup
+
+# Environment files with secrets
+.env
+
+# Runtime data
+authelia/db.sqlite3
+authelia/db.sqlite3-shm
+authelia/db.sqlite3-wal
+authelia/notification.txt
+
+# Redis data
+redis/
+
+# NPM data
+npm/data/
+npm/letsencrypt/
+
+# Logs
+*.log
+
+# Backup files
+*.tar.gz
+*.zip
+backups/

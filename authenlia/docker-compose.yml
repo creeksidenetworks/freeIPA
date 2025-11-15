@@ -1,0 +1,45 @@
+services:
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    volumes:
+      - ./authelia:/config
+    networks:
+      - npm-network
+    ports:
+      - 9091:9091
+    environment:
+      - TZ=America/Los_Angeles
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: authelia-redis
+    volumes:
+      - ./redis:/data
+    networks:
+      - npm-network
+    restart: unless-stopped
+
+  nginx-proxy-manager:
+    image: 'jc21/nginx-proxy-manager:latest'
+    container_name: nginx-proxy-manager
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '81:81'
+      - '443:443'
+    environment:
+      DB_SQLITE_FILE: "/data/database.sqlite"
+    volumes:
+      - ./npm/data:/data
+      - ./npm/letsencrypt:/etc/letsencrypt
+      - ./nginx-configs:/snippets
+    networks:
+      - npm-network
+
+networks:
+  npm-network:
+    driver: bridge
