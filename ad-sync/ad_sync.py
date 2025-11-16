@@ -199,17 +199,17 @@ class ADSync:
                 # Range doesn't exist, create it
                 logger.info(f"Creating ID range '{range_name}' for base {id_range_base}")
                 
-                # Calculate RID base - use the offset from the base
+                # Calculate RID base - use the last digits divided by 1000
                 # For id_range_base=1668600000, RID base should be 600000
-                rid_base = (id_range_base % 1000000000) // 1000
+                rid_base = (id_range_base % 1000000) 
                 secondary_rid_base = 100000000 + rid_base
                 
                 self.ipa_client.idrange_add(
                     range_name,
-                    ipabaseid=id_range_base,
-                    ipaidrangesize=range_size,
-                    ipabaserid=rid_base,
-                    ipasecondarybaserid=secondary_rid_base
+                    o_ipabaseid=id_range_base,
+                    o_ipaidrangesize=range_size,
+                    o_ipabaserid=rid_base,
+                    o_ipasecondarybaserid=secondary_rid_base
                 )
                 
                 logger.info(f"✓ Created ID range '{range_name}' (base: {id_range_base}, size: {range_size})")

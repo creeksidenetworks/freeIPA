@@ -350,12 +350,18 @@ If users get different UIDs in FreeIPA than AD:
 ### SID Generation Errors
 
 If you see errors like "Cannot convert Posix ID into an unused SID":
-- The sync script should automatically create the required ID range
-- If it doesn't, manually create it:
+- The sync script automatically creates the required ID range with proper RID calculation
+- RID base is calculated as: `(id_range_base % 1000000)` 
+  - Example: For `id_range_base=1668600000`, RID base = `600000`
+- If manual creation needed:
   ```bash
-  ipa idrange-add AD_SYNC_RANGE --base-id=1668600000 --range-size=200000
+  # For id_range_base=1668600000:
+  ipa idrange-add AD_SYNC_RANGE --base-id=1668600000 --range-size=200000 \
+    --rid-base=600000 --secondary-rid-base=100600000
   systemctl restart dirsrv@*.service
   ```
+
+**Important:** After creating or modifying ID ranges, restart the directory service to trigger SID generation for existing users.
 
 ## Logs
 
