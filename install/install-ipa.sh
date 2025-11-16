@@ -377,6 +377,26 @@ EOF
         fi
         rm -f /tmp/ldapauth_aci.ldif
         
+        # Add ACI to allow ldapauth to write user passwords for Authelia password reset
+        log "Adding permission for ldapauth to write user passwords (for Authelia password reset)..."
+        local aci_name_password="LDAP Service Account Password Write Access"
+        local aci_value_password="(targetattr=\"userPassword\")(version 3.0; acl \"$aci_name_password\"; allow (write) userdn=\"ldap:///$service_dn\";)"
+        
+        # Create LDIF to add password write ACI
+        cat > /tmp/ldapauth_password_aci.ldif << EOF
+dn: $users_dn
+changetype: modify
+add: aci
+aci: $aci_value_password
+EOF
+        
+        if ldapmodify -Y GSSAPI -H ldap://"$IPA_FQDN" -f /tmp/ldapauth_password_aci.ldif 2>/dev/null; then
+            log "✓ Permission granted for ldapauth to write user passwords"
+        else
+            log "WARNING: Could not add ACI for password write access (may already exist)"
+        fi
+        rm -f /tmp/ldapauth_password_aci.ldif
+        
         # Verify service account can bind (use 127.0.0.1 for simple bind)
         if ldapsearch -x -D "$service_dn" -w "$ldapauth_password" -H ldap://127.0.0.1 -b "cn=accounts,dc=${IPA_DOMAIN//./,dc=}" -s base dn >/dev/null 2>&1; then
             log "✓ Service account authentication verified"
