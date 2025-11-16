@@ -16,34 +16,37 @@ log:
 theme: light
 
 # JWT Secret (generate with: openssl rand -base64 32)
-jwt_secret: H9n8ToJop14KpMaf58kcv1f2CwW3YGDAihdftxqMT4M=
+jwt_secret: CHANGE_ME_GENERATE_RANDOM_STRING
 
 # Default Redirection URL
-default_redirection_url: https://innosilicon.com
+default_redirection_url: https://yourdomain.com
 
-# TOTP Configuration (disabled - using email OTP instead)
+# TOTP Configuration (Time-based One-Time Password for 2FA)
 totp:
-  disable: true
+  disable: true  # Set to false to enable authenticator app 2FA
+  issuer: yourdomain.com
+  period: 30
+  skew: 1
 
-# WebAuthn Configuration (disabled - using email OTP instead)
+# WebAuthn Configuration (Hardware keys like YubiKey)
 webauthn:
   disable: true
 
-# Identity Validation - enables email one-time passwords
+# Identity Validation - for password reset functionality
 identity_validation:
   reset_password:
-    jwt_secret: H9n8ToJop14KpMaf58kcv1f2CwW3YGDAihdftxqMT4M=
+    jwt_secret: CHANGE_ME_GENERATE_RANDOM_STRING
 
 # Authentication Backend (FreeIPA LDAP)
 authentication_backend:
   ldap:
     implementation: custom
-    url: ldap://ipa1.inno.lcl:389
+    url: ldap://your-freeipa-server.com:389
     timeout: 5s
-    start_tls: true
+    start_tls: true  # Required for password changes in FreeIPA
     tls:
-      skip_verify: true
-    base_dn: cn=accounts,dc=inno,dc=lcl
+      skip_verify: true  # Set to false if you have proper certificates
+    base_dn: cn=accounts,dc=example,dc=com
     username_attribute: uid
     additional_users_dn: cn=users
     users_filter: (&({username_attribute}={input})(objectClass=person))
@@ -52,27 +55,26 @@ authentication_backend:
     group_name_attribute: cn
     mail_attribute: mail
     display_name_attribute: displayName
-    user: uid=ldapauth,cn=sysaccounts,cn=etc,dc=inno,dc=lcl
-    password: ZRJokBADxuct
+    user: uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+    password: YOUR_LDAPAUTH_PASSWORD
 
 # Access Control Rules
 access_control:
   default_policy: deny
   rules:
     # Allow everyone to access auth portal
-    - domain: authelia.innosilicon.com
+    - domain: auth.yourdomain.com
       policy: bypass
-    # Protect your applications - require authentication
-    # Email verification required for new device registration
-    - domain: "*.innosilicon.com"
-      policy: one_factor
+    # Protect your applications
+    - domain: "*.yourdomain.com"
+      policy: one_factor  # Change to two_factor if TOTP is enabled
 
 # Session Configuration
 session:
   name: authelia_session
-  domain: innosilicon.com  # Root domain for SSO
+  domain: yourdomain.com  # Root domain for SSO
   same_site: lax
-  secret: DucYZ6ZH6HkJheU3wQh3JPppyaT2bN8Kc4coJHVkqfI=
+  secret: CHANGE_ME_GENERATE_RANDOM_STRING
   expiration: 1h
   inactivity: 5m
   remember_me_duration: 1M
@@ -86,9 +88,9 @@ regulation:
   find_time: 2m
   ban_time: 5m
 
-# Storage (local file)
+# Storage (local SQLite database)
 storage:
-  encryption_key: 1+nZPF3T0o/v4nNcl24B/kR0eydOAt3CmjK5bWaWi4E=
+  encryption_key: CHANGE_ME_GENERATE_RANDOM_STRING
   local:
     path: /config/db/db.sqlite3
 
@@ -96,12 +98,12 @@ storage:
 notifier:
   disable_startup_check: false
   smtp:
-    host: smtp.office365.com
+    host: smtp.example.com  # Your SMTP server
     port: 587
     timeout: 5s
-    username: alert@innosilicon.com  # Change to your email
-    password: psgymbjfwxbynrgb  # Change to your SMTP password/app password
-    sender: "Authelia <alert@innosilicon.com>"  # Change to your sender email
+    username: your-email@example.com
+    password: YOUR_SMTP_PASSWORD
+    sender: "Authelia <your-email@example.com>"
     identifier: localhost
     subject: "[Authelia] {title}"
     startup_check_address: test@authelia.com

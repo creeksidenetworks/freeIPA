@@ -1,0 +1,11 @@
+# Authelia configuration files with secrets
+config/configuration.yml
+config/users_database.yml
+
+# Runtime data
+authelia/db.sqlite3
+authelia/notification.txt
+run/
+
+# Docker Compose override
+docker-compose.override.yml
