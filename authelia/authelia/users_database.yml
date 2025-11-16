@@ -1,0 +1,17 @@
+---
+###############################################################
+#                         Users Database                      #
+###############################################################
+# This file is for fallback authentication when LDAP is unavailable
+# Passwords are in argon2id format
+# Generate with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'yourpassword'
+
+users: {}
+
+# Example user (uncomment and modify):
+#  admin:
+#    displayname: "Administrator"
+#    password: "$argon2id$v=19$m=65536,t=3,p=4$..."
+#    email: admin@example.com
+#    groups:
+#      - admins
