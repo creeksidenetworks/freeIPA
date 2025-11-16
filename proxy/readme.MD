@@ -34,6 +34,8 @@ In NPM's web interface:
    - ✅ **Websockets Support**
    - ⚠️ **CRITICAL: DO NOT enable "Cache Assets"** - This will break sub_filter URL rewriting and cause mixed content errors
 
+   ![Proxy Host Configuration](./images/proxy_host.png)
+
 3. **SSL Tab:**
    - ✅ Select or request SSL certificate for `ipa.mycompany.com`
    - ✅ **Force SSL**
