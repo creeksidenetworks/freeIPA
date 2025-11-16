@@ -184,42 +184,40 @@ class ADSync:
             return False
     
     def ensure_id_range(self) -> bool:
-        """Ensure FreeIPA has an ID range for the configured id_range_base"""
+        """Verify FreeIPA's native ID range matches the configured id_range_base"""
         try:
             id_range_base = self.config['active_directory'].get('id_range_base', 200000)
-            range_name = 'AD_SYNC_RANGE'
-            range_size = 200000
             
-            # Check if range exists
+            # Get all ID ranges to find the native FreeIPA range
             try:
-                result = self.ipa_client.idrange_show(range_name)
-                logger.info(f"✓ ID range '{range_name}' already exists")
-                return True
-            except NotFound:
-                # Range doesn't exist, create it
-                logger.info(f"Creating ID range '{range_name}' for base {id_range_base}")
+                # Use idrange_find method without the problematic parameter
+                ranges = self.ipa_client.idrange_find()
                 
-                # Calculate RID base - use the last digits divided by 1000
-                # For id_range_base=1668600000, RID base should be 600000
-                rid_base = (id_range_base % 1000000) 
-                secondary_rid_base = 100000000 + rid_base
+                for range_data in ranges.get('result', []):
+                    # Look for the local domain range (not AD trust ranges)
+                    if range_data.get('iparangetyperaw', [''])[0] == 'ipa-local':
+                        range_name = range_data.get('cn', [''])[0]
+                        range_base = int(range_data.get('ipabaseid', [0])[0])
+                        range_size = int(range_data.get('ipaidrangesize', [0])[0])
+                        range_max = range_base + range_size
+                        
+                        # Check if configured id_range_base falls within this range
+                        if range_base <= id_range_base < range_max:
+                            logger.info(f"✓ ID range '{range_name}' covers configured base {id_range_base} (range: {range_base}-{range_max})")
+                            return True
                 
-                self.ipa_client.idrange_add(
-                    range_name,
-                    o_ipabaseid=id_range_base,
-                    o_ipaidrangesize=range_size,
-                    o_ipabaserid=rid_base,
-                    o_ipasecondarybaserid=secondary_rid_base
-                )
+                # If we get here, no matching range found
+                logger.warning(f"⚠ FreeIPA native ID range does not cover id_range_base={id_range_base}")
+                logger.warning(f"  FreeIPA must be installed with: ipa-server-install --idstart={id_range_base} --idmax={id_range_base + 200000}")
+                logger.warning(f"  Without this, SID generation will fail and password authentication won't work")
+                return False
                 
-                logger.info(f"✓ Created ID range '{range_name}' (base: {id_range_base}, size: {range_size})")
-                logger.warning("NOTE: Directory server restart recommended. Run: systemctl restart dirsrv@*.service")
-                return True
+            except Exception as e:
+                logger.warning(f"Could not verify ID ranges: {e}")
+                return True  # Don't fail the sync for this
                 
         except Exception as e:
-            logger.warning(f"Could not ensure ID range: {e}")
-            logger.warning("If you get SID generation errors, manually create the ID range:")
-            logger.warning(f"  ipa idrange-add AD_SYNC_RANGE --base-id={id_range_base} --range-size=200000")
+            logger.debug(f"Error checking ID range: {e}")
             return True  # Don't fail the sync for this
     
     def get_ad_users(self) -> List[Dict]:

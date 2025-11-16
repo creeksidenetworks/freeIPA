@@ -443,6 +443,8 @@ install_standalone_server() {
         "--allow-zone-overlap"
         "--auto-reverse"
         "--unattended"
+        "--idstart=1668600000" 
+        "--idmax=1668800000"
     )
     
     # Add DNS forwarders handling
