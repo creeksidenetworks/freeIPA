@@ -158,13 +158,74 @@ If you're unsure of your FreeIPA Base DN:
 ldapsearch -x -b "" -s base namingContexts
 ```
 
+### Setting Up LDAP Service Account for Password Management
+
+Authelia requires a service account with permissions to change user passwords for password reset functionality.
+
+#### Create Service Account and Grant Permissions
+
+#### Manual Setup (Alternative)
+
+If you prefer to set up manually:
+
+1. **Authenticate as admin:**
+   ```bash
+   kinit admin
+   ```
+
+2. **Create LDIF file to grant password permissions:**
+   ```bash
+   cat > /tmp/grant-password-permissions.ldif << 'EOF'
+   dn: cn=accounts,dc=example,dc=com
+   changetype: modify
+   add: aci
+   aci: (targetattr="userPassword || krbPrincipalKey || sambaLMPassword || sambaNTPassword || passwordHistory")(version 3.0; acl "Allow ldapauth to change user passwords"; allow (write) userdn="ldap:///uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com";)
+   aci: (targetattr="ipaNTHash")(version 3.0; acl "Allow ldapauth to read ipaNTHash"; allow (read,search,compare) userdn="ldap:///uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com";)
+   EOF
+   ```
+   
+   **Note:** Replace `dc=example,dc=com` with your actual domain.
+
+3. **Apply the LDAP ACI:**
+   ```bash
+   ldapmodify -Y GSSAPI -H ldap://localhost -f /tmp/grant-password-permissions.ldif
+   ```
+
+4. **Verify credentials are saved:**
+   The ldapauth account credentials should be saved in `/etc/ldap/secrets` on the FreeIPA server:
+   ```
+   LDAP Auth Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+   LDAP Auth Service Account Password: <generated-password>
+   ```
+
+5. **Update Authelia configuration** with these credentials in `config/configuration.yml`:
+   ```yaml
+   authentication_backend:
+     ldap:
+       user: uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+       password: <password-from-/etc/ldap/secrets>
+   ```
+
+#### Enable StartTLS for Password Changes
+
+FreeIPA requires encrypted connections for password operations. In `config/configuration.yml`:
+
+```yaml
+authentication_backend:
+  ldap:
+    url: ldap://your-freeipa-server:389
+    start_tls: true
+    tls:
+      skip_verify: true  # Set to false if you have proper certificates
+```
+
 ### Testing LDAP Connection
 
 ```bash
 # Test from Authelia container
 docker exec -it authelia sh
 ldapsearch -x -H ldap://your-freeipa-server:389 \
-  -D "uid=admin,cn=users,cn=accounts,dc=example,dc=com" \
+  -D "uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com" \
   -w "password" -b "cn=accounts,dc=example,dc=com" "(uid=username)"
 ```
 
@@ -173,6 +234,7 @@ ldapsearch -x -H ldap://your-freeipa-server:389 \
 - Base DN: `cn=accounts,dc=example,dc=com`
 - Users DN: `cn=users,cn=accounts,dc=example,dc=com`
 - Groups DN: `cn=groups,cn=accounts,dc=example,dc=com`
+- System Accounts: `cn=sysaccounts,cn=etc,dc=example,dc=com`
 - Admin User: `uid=admin,cn=users,cn=accounts,dc=example,dc=com`
 
 ## Troubleshooting
