@@ -55,14 +55,14 @@ location / {
     gzip off;
     
     # Set Host header to internal hostname
-    proxy_set_header Host ipa.internal.lcl;
+    proxy_set_header Host $server;
     
     # Other required headers
     proxy_set_header X-Forwarded-Scheme $scheme;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header Referer https://ipa.internal.lcl/ipa/ui;
+    proxy_set_header Referer https://$server/ipa/ui;
     
     # WebSocket support
     proxy_set_header Upgrade $http_upgrade;
@@ -70,7 +70,7 @@ location / {
     proxy_http_version 1.1;
     
     # Cookie domain rewriting
-    proxy_cookie_domain ipa.internal.lcl ipa.mycompany.com;
+    proxy_cookie_domain $server $host;
     
     # Timeouts
     proxy_connect_timeout 150;
