@@ -8,33 +8,25 @@ services:
       - '443:443'    # Public HTTPS Port
       - '81:81'      # Admin Web Port
     volumes:
-      - ./data:/data
-      - ./letsencrypt:/etc/letsencrypt
-    networks:
-      - auth-network
+      - ./run/npm:/data
+      - ./run/letsencrypt:/etc/letsencrypt
 
   redis:
     image: redis:alpine
     container_name: authelia-redis
     restart: unless-stopped
     volumes:
-      - ./redis:/data
-    networks:
-      - auth-network
+      - ./run/redis:/data
 
   authelia:
     image: authelia/authelia:latest
     container_name: authelia
     restart: unless-stopped
     volumes:
-      - ./authelia:/config
-    networks:
-      - auth-network
+      - ./config:/config
+      - ./run/authelia:/config/db
     environment:
       - TZ=America/New_York
     expose:
       - 9091
 
-networks:
-  auth-network:
-    driver: bridge
