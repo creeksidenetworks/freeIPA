@@ -183,6 +183,45 @@ class ADSync:
             logger.error(f"✗ Failed to connect to FreeIPA: {e}")
             return False
     
+    def ensure_id_range(self) -> bool:
+        """Ensure FreeIPA has an ID range for the configured id_range_base"""
+        try:
+            id_range_base = self.config['active_directory'].get('id_range_base', 200000)
+            range_name = 'AD_SYNC_RANGE'
+            range_size = 200000
+            
+            # Check if range exists
+            try:
+                result = self.ipa_client.idrange_show(range_name)
+                logger.info(f"✓ ID range '{range_name}' already exists")
+                return True
+            except NotFound:
+                # Range doesn't exist, create it
+                logger.info(f"Creating ID range '{range_name}' for base {id_range_base}")
+                
+                # Calculate RID base - use the offset from the base
+                # For id_range_base=1668600000, RID base should be 600000
+                rid_base = (id_range_base % 1000000000) // 1000
+                secondary_rid_base = 100000000 + rid_base
+                
+                self.ipa_client.idrange_add(
+                    range_name,
+                    ipabaseid=id_range_base,
+                    ipaidrangesize=range_size,
+                    ipabaserid=rid_base,
+                    ipasecondarybaserid=secondary_rid_base
+                )
+                
+                logger.info(f"✓ Created ID range '{range_name}' (base: {id_range_base}, size: {range_size})")
+                logger.warning("NOTE: Directory server restart recommended. Run: systemctl restart dirsrv@*.service")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Could not ensure ID range: {e}")
+            logger.warning("If you get SID generation errors, manually create the ID range:")
+            logger.warning(f"  ipa idrange-add AD_SYNC_RANGE --base-id={id_range_base} --range-size=200000")
+            return True  # Don't fail the sync for this
+    
     def get_ad_users(self) -> List[Dict]:
         """Get users from Active Directory"""
         try:
@@ -615,6 +654,9 @@ class ADSync:
         
         if not self.connect_ad() or not self.connect_ipa():
             return False
+        
+        # Ensure ID range exists for SID generation
+        self.ensure_id_range()
         
         try:
             if self.config['sync'].get('sync_users', True):

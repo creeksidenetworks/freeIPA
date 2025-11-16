@@ -90,6 +90,13 @@ sync:
 
 **Note:** The `id_range_base` ensures UIDs/GIDs in FreeIPA match what users already have on AD-joined Linux servers.
 
+**Important:** The script automatically creates an ID range (`AD_SYNC_RANGE`) in FreeIPA for the configured `id_range_base`. This range is required for proper SID generation and Kerberos authentication. If you see SID generation errors, the range will be created automatically on the first sync.
+
+After the first sync, you may need to restart the directory server:
+```bash
+sudo systemctl restart dirsrv@*.service
+```
+
 ### 3. Test Connection
 
 ```bash
@@ -314,6 +321,41 @@ If users get different UIDs in FreeIPA than AD:
 - Enable "Identity Management for Unix" in AD
 - Set uidNumber/gidNumber on AD users
 - Or accept auto-assigned IDs (requires fixing file permissions)
+
+### User Password Authentication Issues
+
+**Synced users cannot login with passwords** because:
+- AD passwords cannot be synced to FreeIPA (encrypted differently)
+- Users must set FreeIPA passwords separately
+
+**Solutions:**
+
+1. **Set initial passwords** (admin must set, users change on first login):
+   ```bash
+   ipa passwd username
+   ipa user-mod username --password-expiration='20260101000000Z'  # Set future expiration
+   ```
+
+2. **Use SSH key authentication** (recommended for service accounts):
+   ```bash
+   ipa user-mod username --sshpubkey="ssh-rsa AAAA..."
+   ```
+
+3. **Self-service password reset** (enable for users):
+   - Users can reset passwords through FreeIPA web interface
+   - Or use `ipa passwd` command
+
+**Note:** For true password synchronization, consider setting up **AD Trust** instead of user sync, which allows users to authenticate with their AD credentials.
+
+### SID Generation Errors
+
+If you see errors like "Cannot convert Posix ID into an unused SID":
+- The sync script should automatically create the required ID range
+- If it doesn't, manually create it:
+  ```bash
+  ipa idrange-add AD_SYNC_RANGE --base-id=1668600000 --range-size=200000
+  systemctl restart dirsrv@*.service
+  ```
 
 ## Logs
 
