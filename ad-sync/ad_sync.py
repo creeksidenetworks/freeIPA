@@ -10,6 +10,10 @@ import yaml
 import argparse
 import struct
 import warnings
+import secrets
+import string
+import csv
+from datetime import datetime
 from typing import Dict, List, Optional
 from ldap3 import Server, Connection, ALL, SUBTREE
 from ldap3.core.exceptions import LDAPException
@@ -31,6 +35,39 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def generate_random_password() -> str:
+    """
+    Generate a random password following specific format:
+    - 8 characters total
+    - 1st character: uppercase letter [A-Z] (excluding O)
+    - 2nd-4th characters: lowercase letters [a-z] (excluding l)
+    - 5th-8th characters: digits [0-9]
+    
+    Returns:
+        A random password in format: Xlll#### (e.g., Habc1234)
+    """
+    # Define character sets excluding confusing characters
+    # Exclude 'O' from uppercase (can be confused with 0)
+    uppercase_safe = ''.join(c for c in string.ascii_uppercase if c != 'O')
+    
+    # Exclude 'l' from lowercase (can be confused with 1)
+    lowercase_safe = ''.join(c for c in string.ascii_lowercase if c != 'l')
+    
+    # First character: uppercase letter (excluding O)
+    first_char = secrets.choice(uppercase_safe)
+    
+    # Next 3 characters: lowercase letters (excluding l)
+    lowercase_chars = ''.join(secrets.choice(lowercase_safe) for _ in range(3))
+    
+    # Last 4 characters: digits
+    digit_chars = ''.join(secrets.choice(string.digits) for _ in range(4))
+    
+    # Combine all parts
+    password = first_char + lowercase_chars + digit_chars
+    
+    return password
 
 
 def sid_to_uid(sid_bytes: bytes, id_range_base: int = 200000) -> int:
@@ -152,6 +189,13 @@ class ADSync:
             'groups_updated': 0,
             'memberships_added': 0
         }
+        
+        # Track newly created users with passwords for CSV export
+        self.new_users_passwords = []
+        
+        # Set CSV output file path
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.csv_file = f'new_users_passwords_{timestamp}.csv'
     
     def connect_ad(self) -> bool:
         """Connect to Active Directory"""
@@ -481,7 +525,26 @@ class ADSync:
                     if 'homedirectory' in ipa_user:
                         params['o_homedirectory'] = ipa_user['homedirectory']
                     
+                    # Generate random password for new user
+                    random_password = generate_random_password()
+                    
+                    # Create user
                     self.ipa_client.user_add(uid, givenname, sn, cn, **params)
+                    
+                    # Set the password
+                    try:
+                        self.ipa_client.user_mod(username, o_userpassword=random_password)
+                        
+                        # Track password for CSV export
+                        user_email = ipa_user.get('mail', '')
+                        self.new_users_passwords.append({
+                            'username': username,
+                            'email': user_email,
+                            'password': random_password
+                        })
+                        logger.debug(f"Set random password for {username}")
+                    except Exception as pwd_error:
+                        logger.warning(f"Failed to set password for {username}: {pwd_error}")
                     
                     # Set disabled status after creation if needed
                     if is_disabled:
@@ -645,6 +708,26 @@ class ADSync:
             except Exception as e:
                 logger.error(f"✗ Failed to sync memberships for {groupname}: {e}")
     
+    def save_passwords_to_csv(self):
+        """Save newly created user passwords to CSV file"""
+        if not self.new_users_passwords:
+            logger.debug("No new users with passwords to save")
+            return
+        
+        try:
+            with open(self.csv_file, 'w', newline='') as csvfile:
+                fieldnames = ['username', 'email', 'password']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                for user_data in self.new_users_passwords:
+                    writer.writerow(user_data)
+            
+            logger.info(f"\n✓ Saved {len(self.new_users_passwords)} user passwords to: {self.csv_file}")
+            logger.info(f"  Please secure this file and distribute passwords to users safely.")
+        except Exception as e:
+            logger.error(f"✗ Failed to save passwords to CSV: {e}")
+    
     def sync(self, dry_run: bool = False, force_users: bool = False, force_groups: bool = False):
         """Run full synchronization"""
         if dry_run:
@@ -665,6 +748,10 @@ class ADSync:
             
             if self.config['sync'].get('sync_group_memberships', True):
                 self.sync_memberships(dry_run)
+            
+            # Save passwords to CSV if any new users were created
+            if not dry_run:
+                self.save_passwords_to_csv()
             
             # Print statistics
             logger.info("\n" + "="*60)
