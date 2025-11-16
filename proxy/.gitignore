@@ -1,0 +1,3 @@
+# Nginx Proxy Manager data directories
+data/
+letsencrypt/

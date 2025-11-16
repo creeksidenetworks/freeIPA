@@ -93,6 +93,8 @@ location / {
 }
 ```
 
+![Advanced Configuration](./images/proxy_host.png)
+
 4. **Save** the proxy host
 
 
