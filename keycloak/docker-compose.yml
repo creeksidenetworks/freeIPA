@@ -1,75 +1,70 @@
 services:
+  npm:
+    image: 'jc21/nginx-proxy-manager:latest'
+    container_name: nginx-proxy-manager
+    restart: unless-stopped
+    ports:
+      - '80:80'      # Public HTTP Port
+      - '443:443'    # Public HTTPS Port
+      - '81:81'      # Admin Web Port
+    volumes:
+      - ./npm/data:/data
+      - ./npm/letsencrypt:/etc/letsencrypt
+    networks:
+      - keycloak_network
+
   postgres:
     image: postgres:15
     container_name: keycloak-postgres
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: ${KC_DB_USERNAME}
-      POSTGRES_PASSWORD: ${KC_DB_PASSWORD}
-    volumes:
-      - ./postgres_data:/var/lib/postgresql/data
-    networks:
-      - keycloak-network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - keycloak_network
 
   keycloak:
-    image: quay.io/keycloak/keycloak:23.0
+    image: quay.io/keycloak/keycloak:latest
     container_name: keycloak
+    hostname: keycloak.inno.lcl
+    restart: unless-stopped
     environment:
       # Database configuration
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: ${KC_DB_USERNAME}
-      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
       
-      # Keycloak admin user
+      # Keycloak admin credentials
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       
-      # Hostname configuration
-      KC_HOSTNAME: ipa1.icm.lcl
-      KC_HOSTNAME_PORT: 8080
+      # Hostname configuration - public FQDN
+      KC_HOSTNAME: keycloak.innosilicon.com
       KC_HOSTNAME_STRICT: false
       KC_HOSTNAME_STRICT_HTTPS: false
       
-      # HTTP configuration (production mode)
+      # Proxy configuration (for nginx-proxy-manager)
+      KC_PROXY_HEADERS: xforwarded
       KC_HTTP_ENABLED: true
-      KC_HTTP_PORT: 8080
-      KC_PROXY: edge
-      
-      # Logging
-      KC_LOG_LEVEL: INFO
-      
+    command: start
     ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - keycloak-network
-    restart: unless-stopped
+      - "${KEYCLOAK_HTTP_PORT}:8080"
     volumes:
-      - ./config/themes:/opt/keycloak/themes
-      - ./config/providers:/opt/keycloak/providers
-      - ./config/realms:/opt/keycloak/data/import
-    command: 
-      - start
-      - --import-realm
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/health/ready || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - ./providers:/opt/keycloak/providers
+    depends_on:
+      - postgres
+    networks:
+      - keycloak_network
+    extra_hosts:
+      - "ipa1.inno.lcl:10.81.20.193"
 
 volumes:
   postgres_data:
-    driver: local
 
 networks:
-  keycloak-network:
+  keycloak_network:
     driver: bridge
