@@ -139,15 +139,6 @@ Expected containers:
 - **Bind DN**: `uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com`
 - **Bind Credential**: Your FreeIPA service account password
 
-**LDAP Searching and Updating:**
-- **Edit Mode**: READ_ONLY (recommended)
-- **Users DN**: `cn=users,cn=accounts,dc=example,dc=com`
-- **Username LDAP attribute**: `uid`
-- **RDN LDAP attribute**: `uid`
-- **UUID LDAP attribute**: `ipaUniqueID`
-- **User Object Classes**: `inetOrgPerson, organizationalPerson`
-- **Search Scope**: Subtree
-
 **Connection Settings:**
 - **Use Truststore SPI**: `Always` or `ldapsOnly` (for encrypted LDAPS connection)
 - **Connection Pooling**: ON
@@ -161,12 +152,28 @@ Expected containers:
 - Do not enable StartTLS when using ldaps:// - they cannot be used together
 - Alternative: Use `ldap://` (port 389) with StartTLS enabled (disables connection pooling)
 
+
+![Advanced Configuration](./images/keycloak-freeIPA-connection.png)
+
+**LDAP Searching and Updating:**
+- **Edit Mode**: READ_ONLY (recommended) or WRITABLE for password reset
+- **Users DN**: `cn=users,cn=accounts,dc=example,dc=com`
+- **Username LDAP attribute**: `uid`
+- **RDN LDAP attribute**: `uid`
+- **UUID LDAP attribute**: `ipaUniqueID`
+- **User Object Classes**: `inetOrgPerson, organizationalPerson`
+- **Search Scope**: Subtree
+
+![Advanced Configuration](./images/keycloak-freeIPA-ldap.png)
+
 **Synchronization Settings:**
-- **Import Users**: ON
+- **Import Users**: ON 
 - **Sync Registrations**: OFF (for READ_ONLY mode)
 - **Periodic Full Sync**: ON (optional)
 - **Full Sync Period**: 60000 (60 seconds)
 - **Batch Size**: 1000
+
+![Advanced Configuration](./images/keycloak-freeIPA-sync.png)
 
 #### 3. Save and Test
 
@@ -188,7 +195,7 @@ By default, Keycloak may map FreeIPA's `cn` (full name) to the first name field,
 2. Find and edit the **"first name"** mapper:
    - Click on `first name`
    - Change **LDAP Attribute** from `cn` to `givenName`
-   - Click **"Save"**
+   - Click **"Save"**   
 3. Verify the **"last name"** mapper:
    - Click on `last name`
    - Ensure **LDAP Attribute** is set to `sn`
@@ -196,6 +203,8 @@ By default, Keycloak may map FreeIPA's `cn` (full name) to the first name field,
 4. Re-sync users:
    - Go back to the LDAP provider main page
    - Click **"Sync all users"** to update existing user data
+
+![Advanced Configuration](./images/keycloak-freeIPA-mapping.png)
 
 This ensures:
 - First Name → FreeIPA's `givenName` (actual first name)
