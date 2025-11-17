@@ -143,7 +143,29 @@ Expected containers:
 1. Go to **Users** → **"View all users"**
 2. All FreeIPA users should be visible
 
-#### 5. Configure Group Mapping (Optional)
+#### 5. Fix User Attribute Mapping
+
+By default, Keycloak may map FreeIPA's `cn` (full name) to the first name field, causing duplicate last names. Fix this:
+
+1. Go to **Mappers** tab of your LDAP provider
+2. Find and edit the **"first name"** mapper:
+   - Click on `first name`
+   - Change **LDAP Attribute** from `cn` to `givenName`
+   - Click **"Save"**
+3. Verify the **"last name"** mapper:
+   - Click on `last name`
+   - Ensure **LDAP Attribute** is set to `sn`
+   - Click **"Save"**
+4. Re-sync users:
+   - Go back to the LDAP provider main page
+   - Click **"Sync all users"** to update existing user data
+
+This ensures:
+- First Name → FreeIPA's `givenName` (actual first name)
+- Last Name → FreeIPA's `sn` (surname)
+- Display Name → FreeIPA's `cn` (full name)
+
+#### 6. Configure Group Mapping (Optional)
 
 1. Go to **Mappers** tab of your LDAP provider
 2. Click **"Create"**
