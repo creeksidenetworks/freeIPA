@@ -54,7 +54,27 @@ This starts:
 - Keycloak server
 - Nginx Proxy Manager
 
-### 3. Verify Services
+### 3. Import FreeIPA CA Certificate
+
+Run the certificate setup script to enable secure LDAPS connection:
+
+```bash
+./setup-cert.sh
+```
+
+The script will:
+- Automatically detect FreeIPA server from `.env`
+- Download the CA certificate
+- Import it into Keycloak's truststore
+- Prompt you to restart Keycloak
+
+Then restart Keycloak to apply changes:
+
+```bash
+docker compose restart keycloak
+```
+
+### 4. Verify Services
 
 ```bash
 docker ps
@@ -65,7 +85,7 @@ Expected containers:
 - `keycloak-postgres` - PostgreSQL database
 - `nginx-proxy-manager` - Reverse proxy
 
-### 4. Access Keycloak
+### 5. Access Keycloak
 
 - **Internal**: http://localhost:8080
 - **External**: https://your-domain.com (after NPM configuration)
@@ -382,12 +402,12 @@ docker compose logs -f
 
 ## Security Recommendations
 
-### 1. FreeIPA CA Certificate (Automatic)
+### 1. FreeIPA CA Certificate
 
-The setup automatically imports FreeIPA's CA certificate into Keycloak's truststore on startup:
-- Certificate location: `ipa-ca.crt` in the keycloak directory
-- Import script: `import-cert.sh` runs on container start
-- Custom truststore: `/opt/keycloak/conf/cacerts` (persisted in volume)
+The `setup-cert.sh` script imports FreeIPA's CA certificate into Keycloak's truststore:
+- Downloads certificate from FreeIPA server
+- Imports into custom truststore: `/opt/keycloak/conf/cacerts`
+- Custom truststore persisted in Docker volume `keycloak_conf`
 
 To verify certificate import:
 ```bash
@@ -395,9 +415,8 @@ docker exec keycloak keytool -list -keystore /opt/keycloak/conf/cacerts -storepa
 ```
 
 To update the certificate:
-1. Replace `ipa-ca.crt` with new certificate
-2. Remove the certificate volume: `docker volume rm keycloak_keycloak_certs`
-3. Restart: `docker compose restart keycloak`
+1. Run `./setup-cert.sh` again (it will prompt to re-import)
+2. Restart Keycloak: `docker compose restart keycloak`
 
 ### 2. Change Default Passwords
 
@@ -447,18 +466,19 @@ The setup uses LDAPS (LDAP over SSL) for secure communication:
 ```
 keycloak/
 ├── docker-compose.yml       # Container orchestration
+├── setup-cert.sh            # Certificate setup script (run once after deployment)
 ├── .env                      # Environment configuration (gitignored)
 ├── .env.example             # Environment template
 ├── .gitignore               # Git exclusions
 ├── README.md                # This file
-├── ipa-ca.crt               # FreeIPA CA certificate
-├── import-cert.sh           # Certificate import script (runs on startup)
 ├── providers/               # Keycloak extensions
 │   └── keycloak-2fa-email-authenticator.jar
 └── npm/                     # Nginx Proxy Manager data (gitignored)
     ├── data/                # NPM configuration
     └── letsencrypt/         # SSL certificates
 ```
+
+**Note**: `ipa-ca.crt` is gitignored and downloaded by `setup-cert.sh`
 
 ## Environment Variables
 

@@ -58,10 +58,7 @@ services:
       - "${KEYCLOAK_HTTP_PORT}:8080"
     volumes:
       - ./providers:/opt/keycloak/providers
-      - ./ipa-ca.crt:/opt/keycloak/cert/ipa-ca.crt:ro
-      - ./import-cert.sh:/opt/keycloak/import-cert.sh:ro
-      - keycloak_certs:/opt/keycloak/conf
-    entrypoint: ["/opt/keycloak/import-cert.sh"]
+      - keycloak_conf:/opt/keycloak/conf
     depends_on:
       - postgres
     networks:
@@ -71,7 +68,7 @@ services:
 
 volumes:
   postgres_data:
-  keycloak_certs:
+  keycloak_conf:
 
 networks:
   keycloak_network:
