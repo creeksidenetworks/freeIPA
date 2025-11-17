@@ -262,14 +262,56 @@ The custom email OTP authenticator is included in `providers/keycloak-2fa-email-
 1. Click **"Add step"** → Select **"Username Password Form"** → Requirement: **Required**
 2. Click **"Add step"** → Select **"Email Code"** → Requirement: **Required**
 
-![Advanced Configuration](./images/password-reset-with-email-otp-flow.png)
-
 #### 3. Bind the Flow
 
 1. Go to **Authentication** → **Flows**
 2. Click **"Action"** menu (three dots)
 3. Select **"Bind flow"** → Choose **Browser flow**
 4. Click **"Save"**
+
+### Email Password Reset Flow
+
+To enable email-based password reset functionality:
+
+#### 1. Create Password Reset Flow
+
+1. Go to **Authentication** → **Flows**
+2. Click **"Create flow"**
+3. Configure:
+   - **Name**: Reset Credentials with Email
+   - **Flow type**: Basic flow
+4. Click **"Create"**
+
+#### 2. Add Reset Steps
+
+**Add Choose User:**
+1. Click **"Add step"**
+2. Select **"Choose User"**
+3. Requirement: **Required**
+
+**Add Email Code:**
+1. Click **"Add step"**
+2. Select **"Email Code"**
+3. Requirement: **Required**
+
+**Add Reset Password:**
+1. Click **"Add step"**
+2. Select **"Reset Password"**
+3. Requirement: **Required**
+
+#### 3. Bind the Reset Flow
+
+1. Go to **Authentication** → **Flows**
+2. Find the **"Reset Credentials with Email"** flow
+3. Click **"Action"** menu (three dots)
+4. Select **"Bind flow"** → Choose **Reset credentials flow**
+5. Click **"Save"**
+
+**Note**: For password reset to work with FreeIPA LDAP, ensure your LDAP provider **Edit Mode** is set to **WRITABLE** instead of READ_ONLY.
+
+
+![Advanced Configuration](./images/password-reset-with-email-otp-flow.png)
+
 
 ### Nginx Proxy Manager Configuration
 
