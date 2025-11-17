@@ -273,6 +273,14 @@ The custom email OTP authenticator is included in `providers/keycloak-2fa-email-
 
 To enable email-based password reset functionality:
 
+**⚠️ IMPORTANT**: Before configuring password reset, ensure your FreeIPA LDAP provider **Edit Mode** is set to **WRITABLE** (not READ_ONLY). This allows Keycloak to update passwords in FreeIPA.
+
+To change Edit Mode:
+1. Go to **User Federation** → Select your FreeIPA LDAP provider
+2. Under **LDAP Searching and Updating** section
+3. Set **Edit Mode**: `WRITABLE`
+4. Click **"Save"**
+
 #### 1. Create Password Reset Flow
 
 1. Go to **Authentication** → **Flows**
@@ -306,6 +314,38 @@ To enable email-based password reset functionality:
 3. Click **"Action"** menu (three dots)
 4. Select **"Bind flow"** → Choose **Reset credentials flow**
 5. Click **"Save"**
+
+#### 4. Configure FreeIPA Password Policy for Email Reset
+
+To prevent double login issues after email password reset, configure FreeIPA to allow immediate password changes and disable expiration:
+
+**On your FreeIPA server:**
+
+```bash
+# View current password policy
+ipa pwpolicy-show
+
+# Set passwords to never expire
+ipa pwpolicy-mod --maxlife=0
+
+# Set minimum password lifetime to 0 (allows immediate password change after reset)
+ipa pwpolicy-mod --minlife=0
+
+# Optional: Disable password history to allow reusing passwords
+ipa pwpolicy-mod --history=0
+```
+
+**Why these settings matter for email password reset:**
+- `--maxlife=0`: Passwords never expire (prevents users from being forced to change password again after reset)
+- `--minlife=0`: Allows users to change password immediately after reset (avoids "password too young" errors that cause double login)
+- `--history=0`: Allows password reuse (optional, removes restriction on previous passwords)
+
+**Alternative for production environments:**
+If you want some password expiration but avoid double login:
+```bash
+# Set longer expiration (365 days) with immediate change allowed
+ipa pwpolicy-mod --maxlife=365 --minlife=0 --history=3
+```
 
 **Note**: For password reset to work with FreeIPA LDAP, ensure your LDAP provider **Edit Mode** is set to **WRITABLE** instead of READ_ONLY.
 
