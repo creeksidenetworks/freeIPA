@@ -381,6 +381,12 @@ ipa pwpolicy-mod --maxlife=365 --minlife=0 --history=3
 
 **Advanced Tab:**
 ```nginx
+# Redirect root URL to your realm's account page
+location = / {
+    return 302 https://$host/realms/<your-realm-name>/account/;
+}
+
+# Proxy buffer settings for Keycloak
 proxy_buffer_size          128k;
 proxy_buffers              4 256k;
 proxy_busy_buffers_size    256k;
