@@ -262,6 +262,8 @@ The custom email OTP authenticator is included in `providers/keycloak-2fa-email-
 1. Click **"Add step"** → Select **"Username Password Form"** → Requirement: **Required**
 2. Click **"Add step"** → Select **"Email Code"** → Requirement: **Required**
 
+![Advanced Configuration](./images/password-reset-with-email-otp-flow.png)
+
 #### 3. Bind the Flow
 
 1. Go to **Authentication** → **Flows**
