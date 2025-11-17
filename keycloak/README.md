@@ -16,6 +16,16 @@ Complete Identity and Access Management (IAM) solution with FreeIPA LDAP integra
 - FreeIPA server running and accessible
 - SMTP server for email delivery
 - Domain name configured
+- FreeIPA CA certificate (automatically imported on startup)
+
+## Features
+
+- ✅ Secure LDAPS connection with FreeIPA CA certificate
+- ✅ Automatic certificate import on container startup
+- ✅ Email-based OTP for two-factor authentication
+- ✅ User and group synchronization from FreeIPA
+- ✅ SSL/TLS termination with Nginx Proxy Manager
+- ✅ Persistent PostgreSQL database
 
 ## Quick Start
 
@@ -104,7 +114,7 @@ Expected containers:
 - **Vendor**: Red Hat Directory Server
 
 **Connection and Authentication:**
-- **Connection URL**: `ldap://your-ipa-server:389`
+- **Connection URL**: `ldaps://your-ipa-server:636` (for encrypted connection with certificate)
 - **Bind Type**: simple
 - **Bind DN**: `uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com`
 - **Bind Credential**: Your FreeIPA service account password
@@ -119,10 +129,17 @@ Expected containers:
 - **Search Scope**: Subtree
 
 **Connection Settings:**
-- **Use Truststore SPI**: Only for ldaps
+- **Use Truststore SPI**: `Always` or `ldapsOnly` (for encrypted LDAPS connection)
 - **Connection Pooling**: ON
 - **Connection Timeout**: 5000
 - **Read Timeout**: 5000
+- **StartTLS**: OFF (not needed when using ldaps://)
+
+**Note on Encryption:**
+- The setup includes automatic import of FreeIPA CA certificate into Keycloak's truststore
+- Use `ldaps://` (port 636) for encrypted LDAP with connection pooling
+- Do not enable StartTLS when using ldaps:// - they cannot be used together
+- Alternative: Use `ldap://` (port 389) with StartTLS enabled (disables connection pooling)
 
 **Synchronization Settings:**
 - **Import Users**: ON
@@ -323,6 +340,14 @@ cat keycloak_backup_YYYYMMDD.sql | docker exec -i keycloak-postgres psql -U keyc
 - Verify service account credentials
 - Check base DN and search filters
 - Test connection in Keycloak LDAP settings
+- For LDAPS: Ensure FreeIPA CA certificate is properly imported
+- Don't mix ldaps:// with StartTLS - use one or the other
+
+### SSL/TLS Certificate Errors
+- **"SSL connection already established"**: Using both ldaps:// and StartTLS - disable StartTLS
+- **"Certificate unknown"**: CA certificate not imported - check certificate import logs
+- **"Hostname verification failed"**: Use `Use Truststore SPI: Always` setting
+- Verify certificate: `docker exec keycloak keytool -list -keystore /opt/keycloak/conf/cacerts -storepass changeit -alias freeipa-ca`
 
 ### Email OTP Not Received
 - Test SMTP connection in Realm Settings → Email
@@ -357,7 +382,24 @@ docker compose logs -f
 
 ## Security Recommendations
 
-### 1. Change Default Passwords
+### 1. FreeIPA CA Certificate (Automatic)
+
+The setup automatically imports FreeIPA's CA certificate into Keycloak's truststore on startup:
+- Certificate location: `ipa-ca.crt` in the keycloak directory
+- Import script: `import-cert.sh` runs on container start
+- Custom truststore: `/opt/keycloak/conf/cacerts` (persisted in volume)
+
+To verify certificate import:
+```bash
+docker exec keycloak keytool -list -keystore /opt/keycloak/conf/cacerts -storepass changeit -alias freeipa-ca
+```
+
+To update the certificate:
+1. Replace `ipa-ca.crt` with new certificate
+2. Remove the certificate volume: `docker volume rm keycloak_keycloak_certs`
+3. Restart: `docker compose restart keycloak`
+
+### 2. Change Default Passwords
 
 Update in `.env` file:
 - `KEYCLOAK_ADMIN_PASSWORD`
@@ -369,29 +411,36 @@ docker compose down
 docker compose up -d
 ```
 
-### 2. Enable HTTPS Only
+### 3. Enable HTTPS Only
 
 In production:
 - NPM force SSL enabled
 - Remove HTTP port 8080 exposure
 
-### 3. Secure PostgreSQL
+### 4. Secure PostgreSQL
 
 - PostgreSQL is only accessible within Docker network
 - Don't expose port 5432 externally
 
-### 4. Regular Updates
+### 5. Regular Updates
 
 - Keep Keycloak, PostgreSQL, and NPM images updated
 - Monitor security advisories
 - Backup before updates
 
-### 5. LDAP Service Account
+### 6. LDAP Service Account
 
 - Use read-only service account
 - Store credentials in `.env` (gitignored)
 - Use strong password
 - Rotate periodically
+
+### 7. Encrypted LDAP Connection
+
+The setup uses LDAPS (LDAP over SSL) for secure communication:
+- **Use**: `ldaps://` (port 636) with Connection Pooling ON
+- **Don't use**: StartTLS with ldaps:// (they conflict)
+- **Alternative**: `ldap://` (port 389) with StartTLS ON and Connection Pooling OFF
 
 ## Files Structure
 
@@ -402,6 +451,8 @@ keycloak/
 ├── .env.example             # Environment template
 ├── .gitignore               # Git exclusions
 ├── README.md                # This file
+├── ipa-ca.crt               # FreeIPA CA certificate
+├── import-cert.sh           # Certificate import script (runs on startup)
 ├── providers/               # Keycloak extensions
 │   └── keycloak-2fa-email-authenticator.jar
 └── npm/                     # Nginx Proxy Manager data (gitignored)
