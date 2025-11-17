@@ -29,7 +29,7 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: keycloak
-    hostname: keycloak.inno.lcl
+    hostname: ${KC_HOSTNAME_INTERNAL}
     restart: unless-stopped
     environment:
       # Database configuration
@@ -43,7 +43,7 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       
       # Hostname configuration - public FQDN
-      KC_HOSTNAME: keycloak.innosilicon.com
+      KC_HOSTNAME: ${KC_HOSTNAME}
       KC_HOSTNAME_STRICT: false
       KC_HOSTNAME_STRICT_HTTPS: false
       
@@ -60,7 +60,7 @@ services:
     networks:
       - keycloak_network
     extra_hosts:
-      - "ipa1.inno.lcl:10.81.20.193"
+      - "${FREEIPA_SERVER_HOST}:${FREEIPA_SERVER_IP}"
 
 volumes:
   postgres_data:
