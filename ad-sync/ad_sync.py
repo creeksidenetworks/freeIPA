@@ -403,6 +403,12 @@ class ADSync:
     
     def should_sync_user(self, username: str) -> bool:
         """Check if user should be synced based on filters"""
+        # Skip system users that shouldn't be synced
+        system_users = ['admin', 'root', 'krbtgt', 'guest']
+        if username.lower() in system_users:
+            logger.debug(f"Skipping system user: {username}")
+            return False
+        
         include_filter = self.config['sync'].get('user_include_filter', [])
         exclude_filter = self.config['sync'].get('user_exclude_filter', [])
         
@@ -427,12 +433,15 @@ class ADSync:
         """Sync users from AD to FreeIPA"""
         logger.info("=== Starting User Sync ===")
         users = self.get_ad_users()
+        user_count = 0
         
         for ad_user in users:
             username = ad_user['attributes'].get('sAMAccountName')
             if not username or not self.should_sync_user(username):
                 self.stats['users_skipped'] += 1
                 continue
+            
+            user_count += 1
             
             ipa_user = self.map_user_attributes(ad_user)
             is_disabled = ad_user['attributes'].get('_is_disabled', False)
@@ -450,47 +459,70 @@ class ADSync:
                     # Update attributes if force is enabled
                     if force:
                         params = {}
-                        if 'givenname' in ipa_user:
+                        # Only update if values differ (normalize lists to single values)
+                        def normalize(value):
+                            if isinstance(value, list):
+                                return value[0] if value else None
+                            return value
+                        
+                        if 'givenname' in ipa_user and normalize(existing.get('givenname')) != ipa_user['givenname']:
                             params['o_givenname'] = ipa_user['givenname']
-                        if 'sn' in ipa_user:
+                        if 'sn' in ipa_user and normalize(existing.get('sn')) != ipa_user['sn']:
                             params['o_sn'] = ipa_user['sn']
-                        if 'mail' in ipa_user:
+                        if 'mail' in ipa_user and normalize(existing.get('mail')) != ipa_user['mail']:
                             params['o_mail'] = ipa_user['mail']
-                        if 'telephonenumber' in ipa_user:
+                        if 'telephonenumber' in ipa_user and normalize(existing.get('telephonenumber')) != ipa_user['telephonenumber']:
                             params['o_telephonenumber'] = ipa_user['telephonenumber']
-                        if 'title' in ipa_user:
+                        if 'title' in ipa_user and normalize(existing.get('title')) != ipa_user['title']:
                             params['o_title'] = ipa_user['title']
-                        if 'uidnumber' in ipa_user:
+                        if 'uidnumber' in ipa_user and normalize(existing.get('uidnumber')) != ipa_user['uidnumber']:
                             params['o_uidnumber'] = ipa_user['uidnumber']
-                        if 'gidnumber' in ipa_user:
+                        if 'gidnumber' in ipa_user and normalize(existing.get('gidnumber')) != ipa_user['gidnumber']:
                             params['o_gidnumber'] = ipa_user['gidnumber']
-                        if 'loginshell' in ipa_user:
+                        if 'loginshell' in ipa_user and normalize(existing.get('loginshell')) != ipa_user['loginshell']:
                             params['o_loginshell'] = ipa_user['loginshell']
-                        if 'homedirectory' in ipa_user:
+                        if 'homedirectory' in ipa_user and normalize(existing.get('homedirectory')) != ipa_user['homedirectory']:
                             params['o_homedirectory'] = ipa_user['homedirectory']
                         
                         if params:
-                            self.ipa_client.user_mod(username, **params)
+                            try:
+                                self.ipa_client.user_mod(username, **params)
+                                logger.info(f"✓ Updated user: {username}")
+                            except Exception as mod_error:
+                                if "no modifications to be performed" in str(mod_error).lower():
+                                    logger.info(f"Skipped user {username}: no changes found")
+                                else:
+                                    raise  # Re-raise other errors
+                        else:
+                            logger.info(f"Skipped user {username}: no changes found")
                     
                     # Always update disabled/enabled status
-                    ipa_is_disabled = 'nsaccountlock' in existing and existing['nsaccountlock']
+                    ipa_is_disabled = bool(existing.get('nsaccountlock', False))
                     
-                    if is_disabled and not ipa_is_disabled:
-                        # Disable user in FreeIPA
-                        self.ipa_client.user_disable(username)
-                        logger.info(f"✓ Disabled user: {username}")
-                        self.stats['users_disabled'] += 1
-                    elif not is_disabled and ipa_is_disabled:
-                        # Enable user in FreeIPA
-                        self.ipa_client.user_enable(username)
-                        logger.info(f"✓ Enabled user: {username}")
-                        self.stats['users_enabled'] += 1
-                    else:
-                        status_str = "disabled" if is_disabled else "enabled"
-                        if force:
-                            logger.info(f"✓ Updated user: {username} (status: {status_str})")
+                    try:
+                        if is_disabled and not ipa_is_disabled:
+                            # Disable user in FreeIPA
+                            self.ipa_client.user_disable(username)
+                            logger.info(f"✓ Disabled user: {username}")
+                            self.stats['users_disabled'] += 1
+                        elif not is_disabled and ipa_is_disabled:
+                            # Enable user in FreeIPA
+                            self.ipa_client.user_enable(username)
+                            logger.info(f"✓ Enabled user: {username}")
+                            self.stats['users_enabled'] += 1
                         else:
-                            logger.debug(f"User {username} status unchanged ({status_str})")
+                            status_str = "disabled" if is_disabled else "enabled"
+                            if force:
+                                if not params:  # No attribute changes and status same
+                                    logger.info(f"Skipped user {username}: no changes found")
+                                # else already logged update or skipped
+                            else:
+                                logger.debug(f"User {username} status unchanged ({status_str})")
+                    except Exception as status_error:
+                        if "already disabled" in str(status_error).lower() or "already enabled" in str(status_error).lower():
+                            logger.debug(f"User {username} status already correct: {status_error}")
+                        else:
+                            logger.warning(f"Failed to update status for {username}: {status_error}")
                 
                 self.stats['users_updated'] += 1
                 
@@ -562,11 +594,14 @@ class ADSync:
         """Sync groups from AD to FreeIPA"""
         logger.info("=== Starting Group Sync ===")
         groups = self.get_ad_groups()
+        group_count = 0
         
         for ad_group in groups:
             groupname = ad_group['attributes'].get('sAMAccountName')
             if not groupname or not self.should_sync_group(groupname):
                 continue
+            
+            group_count += 1
             
             # Sanitize group name - FreeIPA only allows letters, numbers, _, -, . and $
             # Replace spaces and other invalid chars with hyphen
