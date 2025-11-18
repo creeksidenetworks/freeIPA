@@ -1,6 +1,7 @@
 #!/bin/bash
 # Setup script to import FreeIPA CA certificate into Keycloak's truststore
-# Run this once AFTER starting containers: ./setup-cert.sh
+# Automatically detects IPA server from .env file
+# Run this once AFTER starting containers: ./init.sh
 
 set -e
 
@@ -42,15 +43,11 @@ echo ""
 if [ -f ".env" ]; then
     IPA_SERVER=$(grep "^FREEIPA_SERVER_HOST=" .env | cut -d '=' -f2)
     if [ -n "$IPA_SERVER" ]; then
-        echo "Found FreeIPA server in .env: $IPA_SERVER"
-        read -p "Use this server? [Y/n]: " USE_ENV
-        if [[ "$USE_ENV" =~ ^[Nn]$ ]]; then
-            IPA_SERVER=""
-        fi
+        echo "Using FreeIPA server from .env: $IPA_SERVER"
     fi
 fi
 
-# Prompt if not found or user declined
+# Prompt if not found
 if [ -z "$IPA_SERVER" ]; then
     read -p "Enter your FreeIPA server hostname or IP (e.g., ipa.example.com): " IPA_SERVER
 fi

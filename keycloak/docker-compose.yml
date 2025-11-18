@@ -1,18 +1,4 @@
 services:
-  npm:
-    image: 'jc21/nginx-proxy-manager:latest'
-    container_name: nginx-proxy-manager
-    restart: unless-stopped
-    ports:
-      - '80:80'      # Public HTTP Port
-      - '443:443'    # Public HTTPS Port
-      - '81:81'      # Admin Web Port
-    volumes:
-      - ./npm/data:/data
-      - ./npm/letsencrypt:/etc/letsencrypt
-    networks:
-      - keycloak_network
-
   postgres:
     image: postgres:15
     container_name: keycloak-postgres

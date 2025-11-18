@@ -54,25 +54,28 @@ This starts:
 - Keycloak server
 - Nginx Proxy Manager
 
-### 3. Import FreeIPA CA Certificate
+### 3. Initialize FreeIPA CA Certificate
 
-Run the certificate setup script to enable secure LDAPS connection:
+Choose one of the following methods to import the FreeIPA CA certificate:
+
+#### Option A: Pre-startup Initialization (Recommended)
+Run before starting containers (no restart required):
 
 ```bash
-./setup-cert.sh
+./init-truststore.sh
+docker compose up -d
 ```
 
-The script will:
-- Automatically detect FreeIPA server from `.env`
-- Download the CA certificate
-- Import it into Keycloak's truststore
-- Prompt you to restart Keycloak
-
-Then restart Keycloak to apply changes:
+#### Option B: Post-startup Setup
+Start containers first, then run setup:
 
 ```bash
+docker compose up -d
+./init.sh
 docker compose restart keycloak
 ```
+
+Both scripts automatically detect the FreeIPA server from your `.env` file and import the CA certificate into Keycloak's truststore.
 
 ### 4. Verify Services
 
@@ -503,7 +506,7 @@ docker compose logs -f
 
 ### 1. FreeIPA CA Certificate
 
-The `setup-cert.sh` script imports FreeIPA's CA certificate into Keycloak's truststore:
+The `init.sh` script imports FreeIPA's CA certificate into Keycloak's truststore:
 - Downloads certificate from FreeIPA server
 - Imports into custom truststore: `/opt/keycloak/conf/cacerts`
 - Custom truststore persisted in Docker volume `keycloak_conf`
@@ -514,7 +517,7 @@ docker exec keycloak keytool -list -keystore /opt/keycloak/conf/cacerts -storepa
 ```
 
 To update the certificate:
-1. Run `./setup-cert.sh` again (it will prompt to re-import)
+1. Run `./init.sh` again (it will prompt to re-import)
 2. Restart Keycloak: `docker compose restart keycloak`
 
 ### 2. Change Default Passwords
@@ -565,7 +568,8 @@ The setup uses LDAPS (LDAP over SSL) for secure communication:
 ```
 keycloak/
 ├── docker-compose.yml       # Container orchestration
-├── setup-cert.sh            # Certificate setup script (run once after deployment)
+├── init.sh                  # Certificate setup script (run once after deployment)
+├── init-truststore.sh       # Pre-startup truststore initialization (alternative to init.sh)
 ├── .env                      # Environment configuration (gitignored)
 ├── .env.example             # Environment template
 ├── .gitignore               # Git exclusions
@@ -611,4 +615,4 @@ keycloak/
 
 ---
 
-**Last Updated**: November 16, 2025
+**Last Updated**: November 17, 2025
