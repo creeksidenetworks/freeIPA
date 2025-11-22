@@ -8,9 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - keycloak_network
+      - ./runtime/postgres_data:/var/lib/postgresql/data
 
   keycloak:
     image: quay.io/keycloak/keycloak:latest
@@ -44,18 +42,9 @@ services:
       - "${KEYCLOAK_HTTP_PORT}:8080"
     volumes:
       - ./providers:/opt/keycloak/providers
-      - keycloak_conf:/opt/keycloak/conf
+      - ./runtime/keycloak_conf:/opt/keycloak/conf
     depends_on:
       - postgres
-    networks:
-      - keycloak_network
     extra_hosts:
       - "${FREEIPA_SERVER_HOST}:${FREEIPA_SERVER_IP}"
 
-volumes:
-  postgres_data:
-  keycloak_conf:
-
-networks:
-  keycloak_network:
-    driver: bridge

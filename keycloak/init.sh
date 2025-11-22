@@ -1,7 +1,7 @@
 #!/bin/bash
 # Setup script to import FreeIPA CA certificate into Keycloak's truststore
 # Automatically detects IPA server from .env file
-# Run this once AFTER starting containers: ./init.sh
+# Run this BEFORE starting containers: ./init.sh
 
 set -e
 
@@ -25,14 +25,17 @@ trap cleanup EXIT
 
 echo "=== FreeIPA CA Certificate Import Setup ==="
 echo ""
+echo "⚠️  IMPORTANT: Run this script BEFORE starting Keycloak containers"
+echo "   If containers are running, stop them first: docker compose down"
+echo ""
 
 # Check if Keycloak container is running
-if ! docker ps | grep -q "$CONTAINER_NAME"; then
-    echo "ERROR: Keycloak container is not running"
-    echo "Please start the containers first with: docker compose up -d"
+if docker ps | grep -q "$CONTAINER_NAME"; then
+    echo "ERROR: Keycloak container is running"
+    echo "Please stop the containers first: docker compose down"
     exit 1
 fi
-echo "✓ Keycloak container is running"
+echo "✓ Keycloak container is not running"
 echo ""
 
 # Download certificate from FreeIPA
@@ -72,27 +75,54 @@ else
     exit 1
 fi
 
-# Copy certificate to container
-echo ""
-echo "Copying certificate to Keycloak container..."
-docker cp "$CERT_FILE" "$CONTAINER_NAME:$CONTAINER_CERT_PATH"
-echo "✓ Certificate copied to container"
+# Copy certificate to container (not needed anymore, we work directly with files)
+# echo ""
+# echo "Copying certificate to Keycloak container..."
+# docker cp "$CERT_FILE" "$CONTAINER_NAME:$CONTAINER_CERT_PATH"
+# echo "✓ Certificate copied to container"
 
-# Check if cacerts file exists, if not create it from system default
+# Start a temporary Keycloak container to extract system cacerts
 echo ""
-echo "Checking if custom truststore exists..."
-if ! docker exec "$CONTAINER_NAME" test -f "$CONTAINER_CACERTS"; then
-    echo "Creating custom truststore from system default..."
-    docker exec "$CONTAINER_NAME" bash -c "cp /etc/pki/ca-trust/extracted/java/cacerts $CONTAINER_CACERTS && chmod 644 $CONTAINER_CACERTS"
-    echo "✓ Custom truststore created"
+echo "Starting temporary Keycloak container to extract system cacerts..."
+TEMP_CONTAINER="keycloak-temp-$(date +%s)"
+docker run -d --name "$TEMP_CONTAINER" --entrypoint sleep quay.io/keycloak/keycloak:latest infinity
+
+# Wait for container to start
+sleep 5
+
+# Extract system cacerts from temporary container
+echo "Extracting system cacerts..."
+# Try multiple possible locations in the container
+if docker exec "$TEMP_CONTAINER" test -f /opt/keycloak/lib/security/cacerts; then
+    docker cp "$TEMP_CONTAINER:/opt/keycloak/lib/security/cacerts" "$TMP_DIR/system-cacerts.jks"
+    echo "✓ Found cacerts in Keycloak lib directory"
+elif docker exec "$TEMP_CONTAINER" test -f /usr/lib/jvm/java-17-openjdk/lib/security/cacerts; then
+    docker cp "$TEMP_CONTAINER:/usr/lib/jvm/java-17-openjdk/lib/security/cacerts" "$TMP_DIR/system-cacerts.jks"
+    echo "✓ Found cacerts in Java 17 directory"
 else
-    echo "✓ Custom truststore exists"
+    # Fallback: use host system's cacerts
+    echo "⚠️  Could not find cacerts in container, using host system cacerts"
+    cp /usr/lib/jvm/java-1.8.0-openjdk-1.8.0.432.b06-3.el9.x86_64/jre/lib/security/cacerts "$TMP_DIR/system-cacerts.jks"
 fi
+
+# Stop and remove temporary container
+docker stop "$TEMP_CONTAINER" >/dev/null 2>&1
+docker rm "$TEMP_CONTAINER" >/dev/null 2>&1
+
+# Create custom truststore directory if it doesn't exist
+TRUSTSTORE_DIR="./runtime/keycloak_conf"
+mkdir -p "$TRUSTSTORE_DIR"
+
+# Copy system cacerts as base for custom truststore
+cp "$TMP_DIR/system-cacerts.jks" "$TRUSTSTORE_DIR/cacerts"
+chmod 644 "$TRUSTSTORE_DIR/cacerts"
+
+echo "✓ Custom truststore created at $TRUSTSTORE_DIR/cacerts"
 
 # Check if certificate already exists in truststore
 echo ""
 echo "Checking if FreeIPA CA certificate is already in truststore..."
-if docker exec "$CONTAINER_NAME" keytool -list -keystore "$CONTAINER_CACERTS" -storepass changeit -alias "$ALIAS" >/dev/null 2>&1; then
+if keytool -list -keystore "$TRUSTSTORE_DIR/cacerts" -storepass changeit -alias "$ALIAS" >/dev/null 2>&1; then
     echo "✓ Certificate '$ALIAS' already exists in truststore"
     echo ""
     read -p "Certificate already imported. Re-import? [y/N]: " REIMPORT
@@ -102,15 +132,15 @@ if docker exec "$CONTAINER_NAME" keytool -list -keystore "$CONTAINER_CACERTS" -s
     fi
     # Delete existing certificate
     echo "Removing existing certificate..."
-    docker exec "$CONTAINER_NAME" keytool -delete -keystore "$CONTAINER_CACERTS" -storepass changeit -alias "$ALIAS"
+    keytool -delete -keystore "$TRUSTSTORE_DIR/cacerts" -storepass changeit -alias "$ALIAS"
 fi
 
 # Import certificate
 echo ""
 echo "Importing FreeIPA CA certificate into truststore..."
-docker exec "$CONTAINER_NAME" keytool -import -trustcacerts -alias "$ALIAS" \
-    -file "$CONTAINER_CERT_PATH" \
-    -keystore "$CONTAINER_CACERTS" \
+keytool -import -trustcacerts -alias "$ALIAS" \
+    -file "$CERT_FILE" \
+    -keystore "$TRUSTSTORE_DIR/cacerts" \
     -storepass changeit \
     -noprompt
 
@@ -124,13 +154,13 @@ fi
 # Verify
 echo ""
 echo "Verifying certificate import..."
-docker exec "$CONTAINER_NAME" keytool -list -keystore "$CONTAINER_CACERTS" -storepass changeit -alias "$ALIAS" -v 2>&1 | head -10
+keytool -list -keystore "$TRUSTSTORE_DIR/cacerts" -storepass changeit -alias "$ALIAS" -v 2>&1 | head -10
 
 echo ""
 echo "=== Setup Complete ==="
 echo ""
 echo "The FreeIPA CA certificate has been imported into Keycloak's truststore."
 echo ""
-echo "⚠️  IMPORTANT: Restart Keycloak for changes to take effect:"
-echo "   docker compose restart keycloak"
+echo "You can now start the containers:"
+echo "   docker compose up -d"
 echo ""
