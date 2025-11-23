@@ -36,7 +36,7 @@ pip install ldap3 python-freeipa pyyaml > /dev/null 2>&1 || { echo "✗ Failed t
 
 echo "============================================="
 echo "Active Directory->FreeIPA Sync - Installation"
-echo "=========================================="
+echo "============================================="
 echo
 
 # If /etc/ipa/secrets exists, use it for FreeIPA credentials
@@ -85,34 +85,37 @@ while true; do
     fi
 
     # Use ldapsearch to auto-detect base DN
+    echo 
     echo "Detecting AD base DN using ldapsearch..."
     BASE_DN=$(ldapsearch -x -H "$AD_SERVER" -D "$AD_ADMIN_FULL" -w "$AD_ADMIN_PASS" -b "" -s base namingContexts 2>/dev/null | awk '/namingContexts:/ {print $2; exit}')
     if [ $? -eq 0 ] && [ -n "$BASE_DN" ]; then
-        echo "✓ LDAP connection successful."
+        echo "✓ Detected base DN: $BASE_DN"
     else
         echo "✗ LDAP connection failed. Please re-enter credentials."
         continue
     fi    
 
     # Prompt for user and group search bases, default to BASE_DN
-    read -p "Enter AD user search base [${BASE_DN}]: " USER_BASE_INPUT
-    if [[ -z "$USER_BASE_INPUT" ]]; then
-        USER_BASE="$BASE_DN"
-    else
+    USER_BASE="OU=all,$BASE_DN"
+    read -p "Enter AD user base DN [${USER_BASE}]: " USER_BASE_INPUT
+    if [[ -n "$USER_BASE_INPUT" ]]; then
         USER_BASE="$USER_BASE_INPUT"
     fi
 
-    read -p "Enter AD group search base [${BASE_DN}]: " GROUP_BASE_INPUT
-    if [[ -z "$GROUP_BASE_INPUT" ]]; then
-        GROUP_BASE="$BASE_DN"
-    else
+    GROUP_BASE="OU=all,$BASE_DN"
+    read -p "Enter AD group base DN [${GROUP_BASE}]: " GROUP_BASE_INPUT
+    if [[ -n "$GROUP_BASE_INPUT" ]]; then
         GROUP_BASE="$GROUP_BASE_INPUT"
     fi
+
+    echo 
+    echo "Searching user base $USER_BASE"
 
     # Verify user search base
     USER_COUNT=$(ldapsearch -x -H "$AD_SERVER" -D "$AD_ADMIN_FULL" -w "$AD_ADMIN_PASS" -b "$USER_BASE" "(objectClass=user)" dn 2>/dev/null | grep '^dn:' | wc -l)
     echo "✓ Found $USER_COUNT users in '$USER_BASE'"
 
+    echo "Searching group base $GROUP_BASE"
     # Verify group search base
     GROUP_COUNT=$(ldapsearch -x -H "$AD_SERVER" -D "$AD_ADMIN_FULL" -w "$AD_ADMIN_PASS" -b "$GROUP_BASE" "(objectClass=group)" dn 2>/dev/null | grep '^dn:' | wc -l)
     echo "✓ Found $GROUP_COUNT groups in '$GROUP_BASE'"
@@ -120,16 +123,10 @@ while true; do
     break
 done
 
-
-
-echo "✓ Detected AD domain: $AD_DOMAIN"
-echo "✓ Detected base DN: $BASE_DN"
-echo "✓ Detected user search base: $USER_BASE"
-echo "✓ Detected group search base: $GROUP_BASE"
-
+echo
 
 # Prompt for IPA info if not set
-while [[ -z "$IPA_SERVER" || -z "$IPA_USER" || -z "$IPA_PASS" ]]; do
+while true; do
     read -p "Enter FreeIPA server hostname (e.g. ipa.example.lcl) [${IPA_SERVER}]: " IPA_SERVER_INPUT
     if [[ -z "$IPA_SERVER_INPUT" && -n "$IPA_SERVER" ]]; then
       IPA_SERVER_INPUT="$IPA_SERVER"
@@ -163,18 +160,18 @@ while [[ -z "$IPA_SERVER" || -z "$IPA_USER" || -z "$IPA_PASS" ]]; do
 
     # Verify IPA connection via LDAP
     IPA_LDAP_URI="ldap://$IPA_SERVER"
-    if command -v ldapsearch &> /dev/null; then
-    ldapsearch -x -H "$IPA_LDAP_URI" -D "uid=$IPA_USER,cn=users,cn=accounts,dc=$(echo $IPA_SERVER | awk -F. '{print $1",dc="$2}')" -w "$IPA_PASS" -b "" -s base namingContexts >/dev/null 2>&1
+    IPA_DN="uid=$IPA_USER,cn=users,cn=accounts"
+    IPA_DC=$(echo "$IPA_SERVER" | awk -F. '{for(i=2;i<=NF;i++) printf "dc=%s%s", $i, (i<NF?",":"")}')
+    IPA_DN="$IPA_DN,$IPA_DC"
+    echo "Testing FreeIPA LDAP connection to $IPA_LDAP_URI with ($IPA_DN,$IPA_DC)"
+    ldapsearch -x -H "$IPA_LDAP_URI" -D "$IPA_DN" -w "$IPA_PASS" -b "" -s base namingContexts >/dev/null 2>&1
     if [ $? -eq 0 ]; then
         echo "✓ FreeIPA LDAP connection successful."
+        break
     else
         echo "✗ FreeIPA LDAP connection failed. Please re-enter credentials."
         # Loop will prompt again
         continue
-    fi
-    else
-        echo "ldapsearch not found. Please install openldap-clients first."
-        exit 1
     fi
 done
 
@@ -207,30 +204,30 @@ fi
 cat > config.yaml << EOF
 # Active Directory Configuration
 active_directory:
-    server: "$AD_SERVER"
-    port: 389
-    use_ssl: false
-    bind_dn: "$AD_ADMIN_FULL"
-    bind_password: "$AD_ADMIN_PASS"
-    base_dn: "$BASE_DN"
-    user_search_base: "$USER_BASE"
-    group_search_base: "$GROUP_BASE"
-    user_filter: "(objectClass=user)"
-    group_filter: "(objectClass=group)"
-    id_range_base: $ID_RANGE_BASE
+  server: "$AD_SERVER"
+  port: 389
+  use_ssl: false
+  bind_dn: "$AD_ADMIN_FULL"
+  bind_password: "$AD_ADMIN_PASS"
+  base_dn: "$BASE_DN"
+  user_search_base: "$USER_BASE"
+  group_search_base: "$GROUP_BASE"
+  user_filter: "(objectClass=user)"
+  group_filter: "(objectClass=group)"
+  id_range_base: $ID_RANGE_BASE
 
 # FreeIPA Configuration
 freeipa:
-    server: "$IPA_SERVER"
-    username: "$IPA_USER"
-    password: "$IPA_PASS"
-    verify_ssl: false
+  server: "$IPA_SERVER"
+  username: "$IPA_USER"
+  password: "$IPA_PASS"
+  verify_ssl: false
 
 # Sync Configuration
 sync:
-    sync_users: true
-    sync_groups: true
-    sync_group_memberships: true
+  sync_users: true
+  sync_groups: true
+  sync_group_memberships: true
   
   # User attribute mapping (AD -> FreeIPA)
   user_attribute_mapping:
@@ -249,9 +246,9 @@ sync:
   
   # Group attribute mapping
   group_attribute_mapping:
-      sAMAccountName: cn
-      description: description
-      gidNumber: gidnumber              # Unix GID for groups
+    sAMAccountName: cn
+    description: description
+    gidNumber: gidnumber              # Unix GID for groups
   
   # Filters (empty = sync all)
   user_include_filter: []
