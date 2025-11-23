@@ -38,15 +38,12 @@ echo
 while true; do
   # Prompt for username if not provided or invalid
   while [[ -z "$AD_ADMIN_FULL" || ! "$AD_ADMIN_FULL" =~ @ ]]; do
-    read -p "Enter AD admin username (e.g. jtong@innosilicon.corp) [default: $DEFAULT_AD_ADMIN]: " AD_ADMIN_FULL_INPUT
-    if [[ -z "$AD_ADMIN_FULL_INPUT" ]]; then
-      AD_ADMIN_FULL="$DEFAULT_AD_ADMIN"
+    read -p "Enter AD admin username (e.g. admin@example.lcl): " AD_ADMIN_FULL_INPUT
+    if [[ -z "$AD_ADMIN_FULL_INPUT" ]] || [[ ! "$AD_ADMIN_FULL_INPUT" =~ @ ]]; then
+      echo "✗ Please enter a valid AD admin username (e.g. admin@example.lcl)"
+      continue
     else
       AD_ADMIN_FULL="$AD_ADMIN_FULL_INPUT"
-    fi
-    if [[ ! "$AD_ADMIN_FULL" =~ @ ]]; then
-      echo "✗ Please enter a valid AD admin username (e.g. jtong@innosilicon.corp)"
-      AD_ADMIN_FULL=""
     fi
   done
   # Prompt for password if not provided
@@ -124,12 +121,12 @@ else
 fi
 
 # Create virtual environment
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-else
-    echo "Virtual environment already exists"
-fi
+#if [ ! -d "venv" ]; then
+#    echo "Creating virtual environment..."
+#    python3 -m venv venv
+#else
+#    echo "Virtual environment already exists"
+#fi
 
 # Activate virtual environment
 #echo "Activating virtual environment..."

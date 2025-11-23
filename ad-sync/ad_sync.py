@@ -600,9 +600,10 @@ class ADSync:
             groupname = ad_group['attributes'].get('sAMAccountName')
             if not groupname or not self.should_sync_group(groupname):
                 continue
-            
+
+            logger.info(f"Read AD group name: {groupname}")
+
             group_count += 1
-            
             # Sanitize group name - FreeIPA only allows letters, numbers, _, -, . and $
             # Replace spaces and other invalid chars with hyphen
             sanitized_groupname = groupname.replace(' ', '-').replace('(', '').replace(')', '')
