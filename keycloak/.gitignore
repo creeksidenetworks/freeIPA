@@ -1,9 +1,0 @@
-# Environment files with secrets
-.env
-
-# Docker volumes
-postgres_data/
-npm/
-
-# FreeIPA CA certificate (specific to your environment)
-ipa-ca.crt
