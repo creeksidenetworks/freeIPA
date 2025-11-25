@@ -200,6 +200,14 @@ if [ -z "$ID_RANGE_BASE" ]; then
       echo "✓ Using ID range base: $ID_RANGE_BASE"
 fi
 
+# Prompt for default email domain (required for email generation)
+read -p "Enter default email domain (e.g. yourcompany.com) [required]: " DEFAULT_EMAIL_DOMAIN
+if [[ -z "$DEFAULT_EMAIL_DOMAIN" ]]; then
+    echo "✗ Default email domain is required. Please enter a valid domain."
+    exit 1
+fi
+echo "✓ Using default email domain: $DEFAULT_EMAIL_DOMAIN"
+
 # Always include full FreeIPA section in config.yaml
 cat > config.yaml << EOF
 # Active Directory Configuration
@@ -228,6 +236,7 @@ sync:
   sync_users: true
   sync_groups: true
   sync_group_memberships: true
+  default_email_domain: "$DEFAULT_EMAIL_DOMAIN"
   
   # User attribute mapping (AD -> FreeIPA)
   user_attribute_mapping:
