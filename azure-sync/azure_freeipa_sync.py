@@ -150,8 +150,22 @@ class AzureFreeIPASync:
         """Initialize FreeIPA client connection."""
         try:
             server = self.config.get('freeipa', 'server').strip('"')
-            admin_user = self.config.get('freeipa', 'admin_user').strip('"')
-            admin_password = self.config.get('freeipa', 'admin_password').strip('"')
+            
+            # Check for bind_dn/bind_password (preferred) or fall back to admin_user/admin_password
+            if self.config.has_option('freeipa', 'bind_dn'):
+                bind_dn = self.config.get('freeipa', 'bind_dn').strip('"')
+                bind_password = self.config.get('freeipa', 'bind_password').strip('"')
+                # Extract username from DN for login (e.g., uid=ldapauth from the full DN)
+                if 'uid=' in bind_dn:
+                    admin_user = bind_dn.split('uid=')[1].split(',')[0]
+                else:
+                    admin_user = 'admin'
+                admin_password = bind_password
+            else:
+                # Fallback to old format
+                admin_user = self.config.get('freeipa', 'admin_user').strip('"')
+                admin_password = self.config.get('freeipa', 'admin_password').strip('"')
+            
             verify_ssl = self.config.getboolean('freeipa', 'verify_ssl', fallback=True)
             
             # Initialize FreeIPA client
@@ -567,8 +581,8 @@ def main():
     parser = argparse.ArgumentParser(description='Azure Entra ID to FreeIPA Sync Tool')
     parser.add_argument(
         '-c', '--config',
-        default='/etc/azure_sync.conf',
-        help='Configuration file path (default: /etc/azure_sync.conf)'
+        default='/opt/azure-freeipa-sync/azure_sync.conf',
+        help='Configuration file path (default: /opt/azure-freeipa-sync/azure_sync.conf)'
     )
     parser.add_argument(
         '--dry-run',
