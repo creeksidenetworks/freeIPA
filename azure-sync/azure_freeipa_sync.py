@@ -32,6 +32,7 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+import subprocess
 
 # Suppress SSL warnings for self-signed certificates
 import urllib3
@@ -344,10 +345,8 @@ class AzureFreeIPASync:
                 
                 # Generate temporary password
                 temp_password = self._generate_temp_password()
-                freeipa_attrs['userpassword'] = temp_password
-                
-                # Set password expiration
-                expiry_days = int(self.config.get('freeipa', 'password_expiry_days', fallback='30'))
+                # Don't set password during user creation - will set it via user_mod after
+                # This is required because NTHash won't be created unless a password change happens
                 
                 # Extract required positional parameters for user_add
                 o_givenname = freeipa_attrs.get('givenname', azure_user.get('givenName', ''))
@@ -366,12 +365,22 @@ class AzureFreeIPASync:
                 freeipa_attrs.pop('givenname', None)
                 freeipa_attrs.pop('sn', None)
                 freeipa_attrs.pop('uid', None)  # Remove uid as it's the first positional parameter
+                freeipa_attrs.pop('userpassword', None)  # Don't set password during creation
                 
-                # Create user with required positional parameters
+                # Create user with required positional parameters (without password)
                 self.freeipa_client.user_add(uid, o_givenname, o_sn, o_cn, **freeipa_attrs)
+                self.logger.info(f"User {uid} created, now setting password via user_mod to generate NTHash")
                 
-                # Do not set password expiration - admin-set passwords should not require immediate change
-                # Password will not expire per the global policy set during FreeIPA installation
+                # Set password via user_mod after user creation to trigger NTHash generation
+                try:
+                    self.freeipa_client.user_mod(uid, o_userpassword=temp_password)
+                    self.logger.info(f"Password set for {uid} via user_mod (NTHash will be generated)")
+                except Exception as pwd_error:
+                    self.logger.error(f"Failed to set password for {uid}: {pwd_error}")
+                    # User was created but password failed - still count as created
+                
+                # Set password to never expire by clearing krbpasswordexpiration
+                self._set_password_never_expire(uid)
                 
                 self.stats['users_created'] += 1
                 self.logger.info(f"Created user {uid} with temporary password: {temp_password}")
@@ -403,6 +412,30 @@ class AzureFreeIPASync:
                 
         except Exception as e:
             self.logger.error(f"Failed to log password for {uid}: {e}")
+    
+    def _set_password_never_expire(self, uid: str):
+        """Set user password to never expire using the FreeIPA client API.
+        
+        This is important for synced users to avoid password expiration issues.
+        NTHash generation requires a password change, and we don't want that password
+        to immediately expire.
+        
+        Sets krbpasswordexpiration to a far future date (2099-12-31 23:59:59 UTC).
+        """
+        try:
+            # Use the FreeIPA client API to set password expiration to far future
+            # The format for krbpasswordexpiration is a datetime string
+            far_future = "20991231235959Z"
+            
+            self.freeipa_client.user_mod(uid, o_krbpasswordexpiration=far_future)
+            self.logger.info(f"Password for {uid} set to never expire (expires 2099-12-31)")
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "no modifications" in error_msg:
+                self.logger.debug(f"Password expiration for {uid} already set correctly")
+            else:
+                self.logger.warning(f"Could not set password expiration for {uid}: {e}")
     
     def sync_group_to_freeipa(self, azure_group: Dict) -> bool:
         """Sync a group from Azure to FreeIPA."""
