@@ -273,8 +273,8 @@ class AzureFreeIPASync:
         """Generate a secure temporary password."""
         length = int(self.config.get('freeipa', 'temp_password_length', fallback='12'))
         
-        # Ensure password has mix of characters
-        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        # Ensure password has mix of characters (exclude ^, /, and other bash-problematic chars)
+        alphabet = string.ascii_letters + string.digits + "!@#$%&*-+=_"
         password = ''.join(secrets.choice(alphabet) for _ in range(length))
         
         # Ensure at least one of each type
@@ -370,12 +370,8 @@ class AzureFreeIPASync:
                 # Create user with required positional parameters
                 self.freeipa_client.user_add(uid, o_givenname, o_sn, o_cn, **freeipa_attrs)
                 
-                # Set password expiration (use krbpasswordexpiration for FreeIPA)
-                expiry_date = (datetime.now() + timedelta(days=expiry_days)).strftime('%Y%m%d%H%M%SZ')
-                try:
-                    self.freeipa_client.user_mod(uid, krbpasswordexpiration=expiry_date)
-                except Exception as e:
-                    self.logger.warning(f"Could not set password expiration for {uid}: {e}")
+                # Do not set password expiration - admin-set passwords should not require immediate change
+                # Password will not expire per the global policy set during FreeIPA installation
                 
                 self.stats['users_created'] += 1
                 self.logger.info(f"Created user {uid} with temporary password: {temp_password}")

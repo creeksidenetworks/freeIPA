@@ -486,6 +486,21 @@ install_standalone_server() {
     
     log "FreeIPA standalone server installation completed successfully"
     
+    # Configure global password policy
+    log "Configuring global password policy..."
+    echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" >/dev/null 2>&1 || error_exit "Failed to get Kerberos ticket for password policy configuration"
+    
+    # Set password policy to never expire with no minimum lifetime
+    ipa pwpolicy-mod --maxlife=0 --minlife=0 2>&1 | tee -a "$LOG_FILE" || {
+        log "WARNING: Could not modify default password policy"
+    }
+    
+    # Clear password notification days so admins don't need to change password immediately
+    ipa config-mod --passwordnotificationdays=0 2>&1 | tee -a "$LOG_FILE" || true
+    
+    log "✓ Password policy configured: Never expire, no minimum lifetime, no forced change on admin-set passwords"
+    kdestroy 2>/dev/null || true
+    
     # Configure DNS forwarders post-installation
     if [[ -n "$DNS_FORWARDERS" ]]; then
         log "Configuring DNS forwarders post-installation..."
@@ -530,6 +545,21 @@ install_standalone_server() {
     
     # Create ldapauth service account for LDAP authentication
     create_ldapauth_service_account
+    
+    # Configure LDAP service account password policy to not require change on first login
+    log "Configuring LDAP service account password policy..."
+    echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" >/dev/null 2>&1 || true
+    
+    local ldapauth_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    # Clear the krbpasswordexpiration to prevent immediate password change requirement
+    ldapmodify -Y GSSAPI -H ldap://"$IPA_FQDN" 2>/dev/null << EOF || true
+dn: $ldapauth_dn
+changetype: modify
+delete: krbpasswordexpiration
+EOF
+    
+    kdestroy 2>/dev/null || true
+    log "✓ LDAP service account password policy configured"
 }
 
 install_replica_server() {
