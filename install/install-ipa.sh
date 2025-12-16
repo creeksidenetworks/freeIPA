@@ -558,6 +558,21 @@ changetype: modify
 delete: krbpasswordexpiration
 EOF
     
+    # Add ldapauth to passSyncManagersDNs so passwords set by ldapauth don't require immediate change
+    log "Adding ldapauth to passSyncManagersDNs (allows password reset without immediate expiration)..."
+    ldapmodify -Y GSSAPI -H ldap://"$IPA_FQDN" 2>/dev/null << EOF || true
+dn: cn=ipa_pwd_extop,cn=plugins,cn=config
+changetype: modify
+add: passSyncManagersDNs
+passSyncManagersDNs: $ldapauth_dn
+EOF
+    
+    if ldapsearch -Y GSSAPI -H ldap://"$IPA_FQDN" -b "cn=ipa_pwd_extop,cn=plugins,cn=config" passSyncManagersDNs 2>/dev/null | grep -q "$ldapauth_dn"; then
+        log "✓ ldapauth added to passSyncManagersDNs successfully"
+    else
+        log "WARNING: Could not verify ldapauth in passSyncManagersDNs (may require Directory Manager)"
+    fi
+    
     kdestroy 2>/dev/null || true
     log "✓ LDAP service account password policy configured"
 }
