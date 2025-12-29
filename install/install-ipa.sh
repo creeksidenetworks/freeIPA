@@ -680,6 +680,21 @@ join_ipa_domain() {
     if [[ -n "$ADMIN_PASSWORD" ]]; then
         admin_password="$ADMIN_PASSWORD"
         log "Using provided admin password for domain join"
+    elif [[ -f "/etc/ipa/secrets" ]]; then
+        # Try to read admin password from existing secrets file
+        log "Found /etc/ipa/secrets file, attempting to read admin password..."
+        local secrets_admin_pass=$(grep -E "^Admin Password:" /etc/ipa/secrets 2>/dev/null | sed 's/^Admin Password:[[:space:]]*//')
+        if [[ -n "$secrets_admin_pass" ]]; then
+            admin_password="$secrets_admin_pass"
+            ADMIN_PASSWORD="$admin_password"
+            log "✓ Retrieved admin password from /etc/ipa/secrets"
+        else
+            log "WARNING: Could not parse admin password from /etc/ipa/secrets"
+            read -s -p "Enter the admin password for domain join: " admin_password
+            echo
+            [[ -z "$admin_password" ]] && error_exit "Admin password is required"
+            ADMIN_PASSWORD="$admin_password"
+        fi
     else
         read -s -p "Enter the admin password for domain join: " admin_password
         echo
@@ -691,22 +706,86 @@ join_ipa_domain() {
     # Join the domain
     log "Joining domain $IPA_DOMAIN..."
     
-    # Check if client is already installed but just needs re-enrollment
+    # First, check if chronyd is running and fix if needed
+    log "Checking NTP/chronyd service..."
+    if ! systemctl is-active --quiet chronyd; then
+        log "chronyd is not running, attempting to fix..."
+        # Stop chronyd and clear any stale state
+        systemctl stop chronyd 2>/dev/null || true
+        # Remove any stale socket files that might cause issues
+        rm -f /var/run/chrony/chronyd.sock 2>/dev/null || true
+        # Try to start chronyd
+        if systemctl start chronyd 2>/dev/null; then
+            log "✓ chronyd started successfully"
+        else
+            log "WARNING: chronyd failed to start, will use --no-ntp option"
+        fi
+    else
+        log "✓ chronyd is running"
+    fi
+    
+    # Determine if we should skip NTP configuration
+    local ntp_option=""
+    if ! systemctl is-active --quiet chronyd; then
+        log "chronyd is not running, adding --no-ntp to avoid NTP-related failures"
+        ntp_option="--no-ntp"
+    fi
+    
+    # Build the ipa-client-install command
+    local client_cmd=(
+        "ipa-client-install"
+        "--server=$primary_server"
+        "--domain=$IPA_DOMAIN"
+        "--realm=$IPA_REALM"
+        "--hostname=$IPA_FQDN"
+        "--principal=$admin_user"
+        "--password=$admin_password"
+        "--mkhomedir"
+        "--force-join"
+        "--unattended"
+    )
+    
+    # Add --no-ntp if chronyd is not working
+    if [[ -n "$ntp_option" ]]; then
+        client_cmd+=("$ntp_option")
+    fi
+    
+    # Run ipa-client-install and capture exit status properly
+    # Using a temp file to capture output while preserving exit status
+    local client_output
+    local client_exit_code
+    
+    client_output=$("${client_cmd[@]}" 2>&1) && client_exit_code=0 || client_exit_code=$?
+    
+    # Log the output
+    echo "$client_output" | tee -a "$LOG_FILE"
+    
+    # Check if it failed
+    if [[ $client_exit_code -ne 0 ]]; then
+        log "ERROR: Client installation failed with exit code: $client_exit_code"
+        log "Last 30 lines of /var/log/ipaclient-install.log:"
+        tail -30 /var/log/ipaclient-install.log 2>/dev/null | tee -a "$LOG_FILE" || true
         
-    ipa-client-install \
-        --server="$primary_server" \
-        --domain="$IPA_DOMAIN" \
-        --realm="$IPA_REALM" \
-        --hostname="$IPA_FQDN" \
-        --principal="$admin_user" \
-        --password="$admin_password" \
-        --mkhomedir \
-        --force-join \
-        --unattended 2>&1 | tee -a "$LOG_FILE" || {
-            log "ERROR: Client installation failed. Last 30 lines of /var/log/ipaclient-install.log:"
-            tail -30 /var/log/ipaclient-install.log 2>/dev/null | tee -a "$LOG_FILE" || true
+        # Check for specific NTP/chronyd failure and retry with --no-ntp
+        if echo "$client_output" | grep -q "chronyd"; then
+            log "Detected chronyd failure, retrying with --no-ntp option..."
+            
+            # Uninstall any partial client installation
+            ipa-client-install --uninstall --unattended 2>/dev/null || true
+            
+            client_cmd+=("--no-ntp")
+            client_output=$("${client_cmd[@]}" 2>&1) && client_exit_code=0 || client_exit_code=$?
+            echo "$client_output" | tee -a "$LOG_FILE"
+            
+            if [[ $client_exit_code -ne 0 ]]; then
+                log "ERROR: Client installation failed even with --no-ntp"
+                tail -30 /var/log/ipaclient-install.log 2>/dev/null | tee -a "$LOG_FILE" || true
+                error_exit "Failed to join FreeIPA domain. Check logs above."
+            fi
+        else
             error_exit "Failed to join FreeIPA domain with --force-join. Check logs above."
-        }
+        fi
+    fi
     
     log "Successfully joined FreeIPA domain"
     
@@ -789,6 +868,60 @@ add_ipa_servers_to_hosts() {
 
 promote_to_replica() {
     log "Promoting client to replica server..."
+    
+    # Pre-promotion verification: Verify and fix hostname configuration
+    log "Pre-promotion check: Verifying hostname configuration..."
+    local current_hostname=$(hostname -f 2>/dev/null)
+    local short_hostname=$(echo "$IPA_FQDN" | cut -d'.' -f1)
+    
+    if [[ "$current_hostname" != "$IPA_FQDN" ]]; then
+        log "WARNING: Current FQDN ($current_hostname) does not match expected ($IPA_FQDN)"
+        log "Fixing hostname configuration..."
+        
+        # Set hostname
+        hostnamectl set-hostname "$IPA_FQDN"
+        
+        # Get our IP address
+        local our_ip=$(get_primary_ip)
+        
+        # Clean up /etc/hosts - remove any entries for our hostname or IP that don't match
+        log "Cleaning up /etc/hosts..."
+        
+        # Remove any lines containing our short hostname or FQDN that don't have the correct mapping
+        sed -i "/[[:space:]]${short_hostname}\./d" /etc/hosts
+        sed -i "/[[:space:]]${short_hostname}$/d" /etc/hosts
+        sed -i "/^${our_ip}[[:space:]]/d" /etc/hosts
+        
+        # Add the correct entry
+        echo "$our_ip $IPA_FQDN $short_hostname" >> /etc/hosts
+        log "✓ Added correct /etc/hosts entry: $our_ip $IPA_FQDN $short_hostname"
+        
+        # Verify the fix
+        current_hostname=$(hostname -f 2>/dev/null)
+        if [[ "$current_hostname" != "$IPA_FQDN" ]]; then
+            log "ERROR: Hostname still incorrect after fix attempt"
+            log "Current: $current_hostname, Expected: $IPA_FQDN"
+            log "Contents of /etc/hosts:"
+            cat /etc/hosts | tee -a "$LOG_FILE"
+            error_exit "Failed to set correct hostname. Please manually verify /etc/hosts and hostname."
+        fi
+        log "✓ Hostname corrected to: $current_hostname"
+    else
+        log "✓ Hostname is correctly set to: $current_hostname"
+    fi
+    
+    # Also verify reverse DNS returns correct hostname
+    local our_ip=$(get_primary_ip)
+    local reverse_hostname=$(getent hosts "$our_ip" 2>/dev/null | awk '{print $2}')
+    if [[ -n "$reverse_hostname" ]] && [[ "$reverse_hostname" != "$IPA_FQDN" ]]; then
+        log "WARNING: Reverse lookup for $our_ip returns $reverse_hostname instead of $IPA_FQDN"
+        log "This may cause issues - updating /etc/hosts to prioritize correct hostname"
+        
+        # Remove conflicting entries and re-add with correct hostname first
+        sed -i "/^${our_ip}[[:space:]]/d" /etc/hosts
+        echo "$our_ip $IPA_FQDN $short_hostname" >> /etc/hosts
+        log "✓ Updated /etc/hosts entry"
+    fi
     
     # Pre-promotion verification: Ensure host exists in IPA
     log "Pre-promotion check: Verifying host exists in IPA..."
@@ -983,7 +1116,44 @@ save_passwords() {
     # Build ldapauth DN
     local ldapauth_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
     
-    # Save secrets to /etc/ipa/secrets
+    # Preserve existing secrets by reading them first
+    local existing_dm_pass=""
+    local existing_admin_pass=""
+    local existing_ldapauth_dn=""
+    local existing_ldapauth_pass=""
+    local existing_radius_secret=""
+    local other_secrets=""
+    
+    if [[ -f "$secrets_file" ]]; then
+        log "Preserving existing secrets from $secrets_file..."
+        
+        # Read existing values
+        existing_dm_pass=$(grep "^Directory Manager Password:" "$secrets_file" 2>/dev/null | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        existing_admin_pass=$(grep "^Admin Password:" "$secrets_file" 2>/dev/null | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        existing_ldapauth_dn=$(grep "^LDAP Auth Service Account DN:" "$secrets_file" 2>/dev/null | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        existing_ldapauth_pass=$(grep "^LDAP Auth Service Account Password:" "$secrets_file" 2>/dev/null | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        existing_radius_secret=$(grep "^RADIUS Client Secret:" "$secrets_file" 2>/dev/null | cut -d':' -f2- | sed 's/^[[:space:]]*//')
+        
+        # Capture any other secrets not in our known list
+        other_secrets=$(grep -v "^#" "$secrets_file" | grep -v "^$" | \
+            grep -v "^Directory Manager Password:" | \
+            grep -v "^Admin Password:" | \
+            grep -v "^LDAP Auth Service Account DN:" | \
+            grep -v "^LDAP Auth Service Account Password:" | \
+            grep -v "^RADIUS Client Secret:" || true)
+        
+        # Backup existing file
+        cp "$secrets_file" "${secrets_file}.bak.$(date +%Y%m%d-%H%M%S)"
+        log "Backed up existing secrets file"
+    fi
+    
+    # Use existing values if new ones are not set or are placeholders
+    if [[ "$dm_pass_note" == "<Use Directory Manager password from primary server>" && -n "$existing_dm_pass" && "$existing_dm_pass" != "<Use Directory Manager password from primary server>" ]]; then
+        dm_pass_note="$existing_dm_pass"
+        log "Preserved existing Directory Manager password"
+    fi
+    
+    # Write secrets file with merged values
     cat > "$secrets_file" << EOF
 # FreeIPA Installation Secrets
 # Generated on: $(date)
@@ -992,8 +1162,13 @@ Directory Manager Password: $dm_pass_note
 Admin Password: $ADMIN_PASSWORD
 EOF
 
-    # Append ldapauth information if it was created
-    if [[ -f /tmp/ipa-install-secrets/ldapauth_password ]]; then
+    # Add ldapauth information - prefer existing, then new from temp file
+    if [[ -n "$existing_ldapauth_pass" ]]; then
+        echo "" >> "$secrets_file"
+        echo "LDAP Auth Service Account DN: ${existing_ldapauth_dn:-$ldapauth_dn}" >> "$secrets_file"
+        echo "LDAP Auth Service Account Password: $existing_ldapauth_pass" >> "$secrets_file"
+        log "Preserved existing LDAP Auth service account credentials"
+    elif [[ -f /tmp/ipa-install-secrets/ldapauth_password ]]; then
         echo "" >> "$secrets_file"
         echo "LDAP Auth Service Account DN: $ldapauth_dn" >> "$secrets_file"
         cat /tmp/ipa-install-secrets/ldapauth_password >> "$secrets_file"
@@ -1001,10 +1176,25 @@ EOF
         log "Added ldapauth service account information to secrets file"
     fi
     
+    # Preserve RADIUS client secret if it existed
+    if [[ -n "$existing_radius_secret" ]]; then
+        echo "" >> "$secrets_file"
+        echo "RADIUS Client Secret: $existing_radius_secret" >> "$secrets_file"
+        log "Preserved existing RADIUS client secret"
+    fi
+    
+    # Append any other preserved secrets
+    if [[ -n "$other_secrets" ]]; then
+        echo "" >> "$secrets_file"
+        echo "# Other preserved secrets:" >> "$secrets_file"
+        echo "$other_secrets" >> "$secrets_file"
+        log "Preserved additional secrets from original file"
+    fi
+    
     chmod 600 "$secrets_file"
     log "Secrets saved to: $secrets_file"
     
-    if [[ -z "$DM_PASSWORD" ]]; then
+    if [[ "$dm_pass_note" == "<Use Directory Manager password from primary server>" ]]; then
         log "NOTE: Directory Manager password not set."
         log "      Update $secrets_file with the correct password or provide with -d option if needed."
     fi
