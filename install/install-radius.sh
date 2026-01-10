@@ -184,14 +184,8 @@ prompt_for_passwords() {
         [[ -z "$ADMIN_PASSWORD" ]] && error_exit "Admin password is required"
     fi
     
-    if [[ -z "$RADIUS_SERVICE_PASSWORD" ]]; then
-        log "ERROR: LDAP Auth service account password not found in $SECRETS_FILE"
-        log "This password should have been created during FreeIPA installation."
-        log "Please ensure you ran install-ipa.sh first, or provide the password manually."
-        read -s -p "Enter ldapauth service account password: " RADIUS_SERVICE_PASSWORD
-        echo
-        [[ -z "$RADIUS_SERVICE_PASSWORD" ]] && error_exit "LDAP Auth service account password is required"
-    fi
+    # Note: LDAP Auth service account password is handled in verify_or_create_ldapauth_account()
+    # which checks if the account exists and prompts the user accordingly
     
     if [[ -z "$RADIUS_SECRET" ]]; then
         RADIUS_SECRET=$(generate_password)
