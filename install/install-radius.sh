@@ -35,6 +35,7 @@ IPA_DOMAIN=""
 IPA_REALM=""
 ADMIN_PASSWORD=""
 RADIUS_SERVICE_PASSWORD=""
+LDAP_SERVICE_DN=""
 RADIUS_SECRET=""
 SECRETS_FILE="/etc/ipa/secrets"
 
@@ -200,10 +201,46 @@ prompt_for_passwords() {
 
 # --- Service Account Verification ---
 
+prompt_service_account_choice() {
+    echo ""
+    log "ldapauth service account not found in FreeIPA"
+    log "You have two options:"
+    echo ""
+    echo "1. Create a new 'ldapauth' service account (recommended)"
+    echo "2. Use Directory Manager (cn=Directory Manager) for LDAP authentication"
+    echo ""
+    read -p "Please choose an option (1 or 2): " choice
+    
+    case "$choice" in
+        1)
+            return 1  # Signal to create account
+            ;;
+        2)
+            return 0  # Signal to use directory manager
+            ;;
+        *)
+            log "ERROR: Invalid choice. Please enter 1 or 2."
+            prompt_service_account_choice
+            ;;
+    esac
+}
+
+use_directory_manager_auth() {
+    log "Using Directory Manager for LDAP authentication"
+    
+    # Set service DN to Directory Manager
+    LDAP_SERVICE_DN="cn=Directory Manager"
+    RADIUS_SERVICE_PASSWORD="$ADMIN_PASSWORD"
+    
+    log "✓ Directory Manager will be used for LDAP authentication"
+    log "Note: Directory Manager is a privileged account. Consider creating a dedicated ldapauth account in the future."
+}
+
 verify_or_create_ldapauth_account() {
     log "Checking for ldapauth service account..."
     
     local service_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    LDAP_SERVICE_DN="$service_dn"  # Set global variable for later use
     
     # Get Kerberos ticket as admin
     echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" || error_exit "Failed to get Kerberos ticket"
@@ -262,8 +299,20 @@ verify_or_create_ldapauth_account() {
             fi
         fi
     else
-        # Account doesn't exist, create it
+        # Account doesn't exist, ask user
+        kdestroy 2>/dev/null || true
+        
+        if prompt_service_account_choice; then
+            # User chose to use Directory Manager
+            use_directory_manager_auth
+            return
+        fi
+        
+        # User chose to create the account
         log "ldapauth service account not found, creating it..."
+        
+        # Get Kerberos ticket again for creating account
+        echo "$ADMIN_PASSWORD" | kinit admin@"$IPA_REALM" || error_exit "Failed to get Kerberos ticket"
         
         RADIUS_SERVICE_PASSWORD=$(generate_password)
         
@@ -357,23 +406,30 @@ configure_firewall() {
 configure_radius_ldap() {
     local ldap_config="/etc/raddb/mods-available/ipa-ldap"
     local base_dn="cn=accounts,dc=${IPA_DOMAIN//./,dc=}"
-    local service_dn="uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
 
     log "Configuring FreeRADIUS IPA LDAP module..."
+    
+    # Determine service description based on whether using ldapauth or Directory Manager
+    local service_description
+    if [[ "$LDAP_SERVICE_DN" == "cn=Directory Manager" ]]; then
+        service_description="Directory Manager"
+    else
+        service_description="ldapauth"
+    fi
 
     # Generate complete IPA LDAP configuration file
     cat > "$ldap_config" << LDAPEOF
 # -*- text -*-
 #
 #  FreeRADIUS LDAP module configuration for FreeIPA
-#  Using service account: ldapauth
+#  Using service account: $service_description
 #
 
 ldap {
     server = '127.0.0.1'
     port = 389
     
-    identity = '$service_dn'
+    identity = '$LDAP_SERVICE_DN'
     password = '$RADIUS_SERVICE_PASSWORD'
     
     base_dn = '$base_dn'
@@ -823,11 +879,18 @@ parse_arguments() {
 # --- Configuration Summary ---
 
 show_configuration_summary() {
+    local service_account_desc
+    if [[ "$LDAP_SERVICE_DN" == "cn=Directory Manager" ]]; then
+        service_account_desc="Directory Manager (cn=Directory Manager)"
+    else
+        service_account_desc="ldapauth (uid=ldapauth,cn=sysaccounts,cn=etc)"
+    fi
+    
     log "=== FreeRADIUS Installation Configuration ==="
     log "FQDN: $IPA_FQDN"
     log "Domain: $IPA_DOMAIN"
     log "Realm: $IPA_REALM"
-    log "Service Account: ldapauth"
+    log "LDAP Service Account: $service_account_desc"
     log "RADIUS Client Secret: $RADIUS_SECRET"
     log "Log File: $LOG_FILE"
     log "=============================================="
@@ -877,8 +940,15 @@ main() {
     log "=== Installation Complete ==="
     log "FreeRADIUS is now running and configured for FreeIPA"
     log ""
-    log "Service Account: ldapauth"
-    log "Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    
+    # Display service account information
+    if [[ "$LDAP_SERVICE_DN" == "cn=Directory Manager" ]]; then
+        log "LDAP Service Account: Directory Manager (cn=Directory Manager)"
+    else
+        log "LDAP Service Account: ldapauth"
+        log "Service Account DN: uid=ldapauth,cn=sysaccounts,cn=etc,dc=${IPA_DOMAIN//./,dc=}"
+    fi
+    
     log "RADIUS Client Secret: $RADIUS_SECRET"
     log "All secrets saved to: $SECRETS_FILE"
     log "Installation log: $LOG_FILE"

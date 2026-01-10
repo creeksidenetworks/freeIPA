@@ -180,10 +180,28 @@ check_and_configure_static_ip() {
     # Check if using NetworkManager
     if systemctl is-active --quiet NetworkManager; then
         local connection_name=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$interface$" | cut -d: -f1)
-        
+
         if [[ -z "$connection_name" ]]; then
             log "WARNING: No active NetworkManager connection found for $interface"
-            return 1
+            # In some environments (LXD containers) NetworkManager may be present
+            # but not have an active connection entry for the interface. Ask the
+            # user whether to continue the installation or abort so they can
+            # configure networking manually.
+            while true; do
+                read -r -p "No active NetworkManager connection found for $interface. Continue installation anyway? [y/N]: " ans
+                case "$ans" in
+                    [Yy]|[Yy][Ee][Ss])
+                        log "User chose to continue despite missing NetworkManager connection"
+                        break
+                        ;;
+                    [Nn]|"")
+                        error_exit "Aborting per user request due to missing NetworkManager connection for $interface"
+                        ;;
+                    *)
+                        echo "Please answer y or n."
+                        ;;
+                esac
+            done
         fi
         
         log "Active connection: $connection_name"
