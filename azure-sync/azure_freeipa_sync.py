@@ -344,26 +344,24 @@ class AzureFreeIPASync:
             try:
                 existing_user = self.freeipa_client.user_show(uid)
 
-                # Repair legacy emails: previous sync versions set mail to uid@freeipa_domain
-                # for users without an email license. Replace those with the correct value
-                # (Azure mail attribute if licensed, otherwise Azure UPN).
-                freeipa_domain = self.config.get('freeipa', 'domain', fallback='').strip('"').lower()
+                # Always keep the email in sync with Azure — covers legacy FreeIPA-domain
+                # addresses, stale UPNs, manually-set values, or any other mismatch.
                 correct_mail = freeipa_attrs.get('mail', '')
-                if freeipa_domain and correct_mail:
+                if correct_mail:
                     mail_field = existing_user.get('mail', [])
                     if isinstance(mail_field, list):
                         current_mail = mail_field[0] if mail_field else ''
                     else:
                         current_mail = mail_field or ''
-                    if current_mail.lower().endswith(f'@{freeipa_domain}') and current_mail != correct_mail:
-                        self.logger.info(f"Fixing legacy FreeIPA-domain email for {uid}: {current_mail} -> {correct_mail}")
+                    if current_mail != correct_mail:
+                        self.logger.info(f"Updating email for {uid}: {current_mail!r} -> {correct_mail!r}")
                         try:
                             self.freeipa_client.user_mod(uid, o_mail=correct_mail)
                             self.stats['users_updated'] += 1
                         except Exception as mail_err:
                             self.logger.error(f"Failed to update mail for {uid}: {mail_err}")
                     else:
-                        self.logger.info(f"User {uid} already exists, skipping user updates")
+                        self.logger.debug(f"User {uid} email is current, no update needed")
 
                 return True
                 
