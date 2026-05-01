@@ -24,12 +24,15 @@ sys.path.insert(0, '/usr/lib/python3.9/site-packages')
 import json
 import logging
 import secrets
+import smtplib
+import socket
 import string
 import configparser
 import argparse
 import time
 import warnings
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 import subprocess
@@ -75,7 +78,10 @@ class AzureFreeIPASync:
             'start_time': None,
             'end_time': None
         }
-        
+
+        # Collects (category, detail) tuples for the notification email
+        self.error_details: List[Tuple[str, str]] = []
+
         self.logger.info("Azure FreeIPA Sync initialized")
     
     def _setup_logging(self):
@@ -418,8 +424,10 @@ class AzureFreeIPASync:
                 return True
                 
         except Exception as e:
-            self.logger.error(f"Failed to sync user {azure_user.get('userPrincipalName', 'unknown')}: {e}")
+            upn = azure_user.get('userPrincipalName', 'unknown')
+            self.logger.error(f"Failed to sync user {upn}: {e}")
             self.stats['users_errors'] += 1
+            self.error_details.append(('User sync', f"{upn}: {e}"))
             return False
     
     def _log_new_user_password(self, uid: str, password: str, display_name: str):
@@ -503,8 +511,10 @@ class AzureFreeIPASync:
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to sync group {azure_group.get('displayName', 'unknown')}: {e}")
+            name = azure_group.get('displayName', 'unknown')
+            self.logger.error(f"Failed to sync group {name}: {e}")
             self.stats['groups_errors'] += 1
+            self.error_details.append(('Group sync', f"{name}: {e}"))
             return False
     
     def create_backup(self) -> bool:
@@ -549,9 +559,13 @@ class AzureFreeIPASync:
             
             # Initialize clients
             if not self._initialize_azure_client():
+                self._send_notification(critical="Failed to authenticate with Azure Entra ID. "
+                                                  "Check client_id, client_secret, and tenant_id in config.")
                 return False
-            
+
             if not self._initialize_freeipa_client():
+                self._send_notification(critical="Failed to connect to FreeIPA server. "
+                                                  "Check server address and bind credentials in config.")
                 return False
             
             # Create backup
@@ -588,11 +602,14 @@ class AzureFreeIPASync:
             
             self.stats['end_time'] = datetime.now()
             self._print_sync_summary()
-            
+            self._send_notification()
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Sync failed: {e}")
+            self.error_details.append(('Fatal', str(e)))
+            self.stats['end_time'] = datetime.now()
+            self._send_notification(critical=f"Sync aborted with an unexpected error: {e}")
             return False
         
         finally:
@@ -604,6 +621,95 @@ class AzureFreeIPASync:
                 except Exception:
                     pass
     
+    def _build_report(self, critical: str = None) -> str:
+        """Build plain-text email body from current sync state."""
+        hostname = socket.gethostname()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        start = self.stats['start_time']
+        end = self.stats['end_time'] or datetime.now()
+        duration = (end - start) if start else 'N/A'
+
+        lines = [
+            f"Azure FreeIPA Sync Report",
+            f"Host     : {hostname}",
+            f"Time     : {now}",
+            f"Duration : {duration}",
+            "",
+        ]
+
+        if critical:
+            lines += [
+                "*** CRITICAL ERROR ***",
+                critical,
+                "",
+            ]
+
+        lines += [
+            "--- Sync Statistics ---",
+            f"Users   created : {self.stats['users_created']}",
+            f"Users   updated : {self.stats['users_updated']}",
+            f"Users   errors  : {self.stats['users_errors']}",
+            f"Groups  created : {self.stats['groups_created']}",
+            f"Groups  updated : {self.stats['groups_updated']}",
+            f"Groups  errors  : {self.stats['groups_errors']}",
+            "",
+        ]
+
+        if self.error_details:
+            lines.append("--- Error Details ---")
+            for category, detail in self.error_details:
+                lines.append(f"[{category}] {detail}")
+            lines.append("")
+
+        lines.append("-- azure-freeipa-sync --")
+        return "\n".join(lines)
+
+    def _send_notification(self, critical: str = None):
+        """Send an email notification via SMTP if configured."""
+        if not self.config.getboolean('smtp', 'enabled', fallback=False):
+            return
+
+        total_errors = self.stats['users_errors'] + self.stats['groups_errors']
+        notify_on_success = self.config.getboolean('smtp', 'notify_on_success', fallback=False)
+
+        if not critical and total_errors == 0 and not notify_on_success:
+            return
+
+        try:
+            smtp_server  = self.config.get('smtp', 'server').strip('"')
+            smtp_port    = int(self.config.get('smtp', 'port', fallback='587'))
+            use_tls      = self.config.getboolean('smtp', 'use_tls', fallback=True)
+            username     = self.config.get('smtp', 'username', fallback='').strip('"')
+            password     = self.config.get('smtp', 'password', fallback='').strip('"')
+            from_addr    = self.config.get('smtp', 'from_address').strip('"')
+            to_addrs     = [a.strip() for a in
+                            self.config.get('smtp', 'to_addresses').split(',')]
+
+            hostname = socket.gethostname()
+            if critical:
+                subject = f"[Azure Sync] CRITICAL on {hostname}"
+            elif total_errors > 0:
+                subject = f"[Azure Sync] {total_errors} error(s) on {hostname}"
+            else:
+                subject = f"[Azure Sync] OK on {hostname}"
+
+            msg = MIMEText(self._build_report(critical), 'plain')
+            msg['Subject'] = subject
+            msg['From']    = from_addr
+            msg['To']      = ', '.join(to_addrs)
+
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
+                if use_tls:
+                    smtp.starttls()
+                if username and password:
+                    smtp.login(username, password)
+                smtp.sendmail(from_addr, to_addrs, msg.as_string())
+
+            self.logger.info(f"Notification sent to {', '.join(to_addrs)}: {subject}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to send notification email: {e}")
+
     def _print_sync_summary(self):
         """Print synchronization summary."""
         duration = self.stats['end_time'] - self.stats['start_time']

@@ -336,17 +336,21 @@ bind_dn = $IPA_BIND_DN
 bind_password = $IPA_BIND_PASSWORD
 
 [sync]
-# Default shell for new users
 default_shell = /bin/bash
-
-# Default home directory base
 home_directory = /home
-
-# Log file location
 log_file = $LOG_DIR/azure-freeipa-sync.log
-
-# Dry run mode (set to false for actual sync)
 dry_run = false
+
+[smtp]
+enabled = $SMTP_ENABLED
+server = $SMTP_SERVER
+port = $SMTP_PORT
+use_tls = $SMTP_USE_TLS
+username = $SMTP_USERNAME
+password = $SMTP_PASSWORD
+from_address = $SMTP_FROM
+to_addresses = $SMTP_TO
+notify_on_success = $SMTP_NOTIFY_SUCCESS
 EOF
 
     chmod 600 "$CONFIG_FILE"
@@ -442,9 +446,60 @@ EOF
     print_ok "Sync schedule: $TIMER_DESC"
 }
 
+# Collect optional SMTP notification settings
+configure_smtp() {
+    print_step "9" "Email Notifications (SMTP)"
+
+    echo ""
+    echo -n "  Enable email notifications on errors? [y/N]: "
+    read -r enable_smtp
+    if [[ "${enable_smtp,,}" != "y" ]]; then
+        SMTP_ENABLED=false
+        SMTP_SERVER=""
+        SMTP_PORT=587
+        SMTP_USE_TLS=true
+        SMTP_USERNAME=""
+        SMTP_PASSWORD=""
+        SMTP_FROM=""
+        SMTP_TO=""
+        SMTP_NOTIFY_SUCCESS=false
+        print_info "Notifications disabled — you can enable them later in $CONFIG_FILE"
+        return
+    fi
+
+    SMTP_ENABLED=true
+
+    echo -n "  SMTP server: "
+    read -r SMTP_SERVER
+    echo -n "  SMTP port [587]: "
+    read -r SMTP_PORT
+    SMTP_PORT=${SMTP_PORT:-587}
+    echo -n "  Use STARTTLS? [Y/n]: "
+    read -r tls_choice
+    [[ "${tls_choice,,}" == "n" ]] && SMTP_USE_TLS=false || SMTP_USE_TLS=true
+    echo -n "  SMTP username (leave blank if none): "
+    read -r SMTP_USERNAME
+    if [[ -n "$SMTP_USERNAME" ]]; then
+        echo -n "  SMTP password: "
+        read -rs SMTP_PASSWORD
+        echo
+    else
+        SMTP_PASSWORD=""
+    fi
+    echo -n "  From address: "
+    read -r SMTP_FROM
+    echo -n "  To address(es) (comma-separated): "
+    read -r SMTP_TO
+    echo -n "  Also notify on successful (error-free) runs? [y/N]: "
+    read -r notify_ok
+    [[ "${notify_ok,,}" == "y" ]] && SMTP_NOTIFY_SUCCESS=true || SMTP_NOTIFY_SUCCESS=false
+
+    print_ok "SMTP notifications configured"
+}
+
 # Install logrotate config and tiered cleanup cron jobs
 setup_log_rotation() {
-    print_step "9" "Configuring Log Rotation"
+    print_step "10" "Configuring Log Rotation"
 
     # logrotate config: rotate hourly, dateext stamps for cleanup script
     cp "$SCRIPT_DIR/logrotate.conf" /etc/logrotate.d/azure-freeipa-sync
@@ -649,6 +704,7 @@ main() {
     get_azure_config
     get_ipa_credentials
     create_sync_user
+    configure_smtp
     create_config_file
     install_files
     create_systemd_timer

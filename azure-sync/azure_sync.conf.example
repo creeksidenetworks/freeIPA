@@ -51,6 +51,20 @@ batch_size=50
 max_retries=3
 retry_delay=5
 
+[smtp]
+# Email notifications (optional)
+# Set enabled=true and fill in the fields below to receive alerts on errors.
+enabled=false
+server=smtp.yourdomain.com
+port=587
+use_tls=true
+username=azure-sync@yourdomain.com
+password=your-smtp-password
+from_address=azure-sync@yourdomain.com
+to_addresses=admin@yourdomain.com,ops@yourdomain.com
+# Set notify_on_success=true to also receive a confirmation email after clean runs
+notify_on_success=false
+
 [mapping]
 # Azure to FreeIPA attribute mapping
 # Format: azure_attribute=freeipa_attribute
