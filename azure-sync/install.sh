@@ -435,6 +435,39 @@ EOF
     print_ok "Sync schedule: $TIMER_DESC"
 }
 
+# Install logrotate config and tiered cleanup cron jobs
+setup_log_rotation() {
+    print_step "8" "Configuring Log Rotation"
+
+    # logrotate config: rotate hourly, dateext stamps for cleanup script
+    cp "$SCRIPT_DIR/logrotate.conf" /etc/logrotate.d/azure-freeipa-sync
+    chmod 644 /etc/logrotate.d/azure-freeipa-sync
+    print_ok "logrotate config installed: /etc/logrotate.d/azure-freeipa-sync"
+
+    # Hourly cron: trigger logrotate for this config every hour
+    cat > /etc/cron.hourly/azure-freeipa-sync-rotate <<'EOF'
+#!/bin/bash
+/usr/sbin/logrotate /etc/logrotate.d/azure-freeipa-sync
+EOF
+    chmod 755 /etc/cron.hourly/azure-freeipa-sync-rotate
+    print_ok "Hourly log rotation cron installed"
+
+    # Cleanup script: tiered retention (hourly/daily/weekly)
+    cp "$SCRIPT_DIR/cleanup_logs.py" "$INSTALL_DIR/cleanup_logs.py"
+    chmod 755 "$INSTALL_DIR/cleanup_logs.py"
+    print_ok "Log cleanup script installed: $INSTALL_DIR/cleanup_logs.py"
+
+    # Daily cron: run tiered retention cleanup once a day
+    cat > /etc/cron.daily/azure-freeipa-sync-cleanup <<EOF
+#!/bin/bash
+/usr/bin/python3 $INSTALL_DIR/cleanup_logs.py
+EOF
+    chmod 755 /etc/cron.daily/azure-freeipa-sync-cleanup
+    print_ok "Daily log cleanup cron installed"
+
+    print_info "Retention policy: hourly (24 h) -> daily (7 days) -> weekly (3 months)"
+}
+
 # Show usage instructions
 show_usage_instructions() {
     print_header "Installation Complete"
@@ -486,6 +519,7 @@ main() {
     create_config_file
     install_files
     create_systemd_timer
+    setup_log_rotation
     show_usage_instructions
     
     echo -e "${Green}${Bold}✓ Installation completed successfully${Reset}"

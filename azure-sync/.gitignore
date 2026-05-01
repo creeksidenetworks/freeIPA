@@ -2,6 +2,7 @@
 azure_sync.conf
 *.conf
 !*.conf.example
+!logrotate.conf
 
 # Logs
 *.log
