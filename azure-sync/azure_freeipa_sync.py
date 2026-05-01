@@ -345,7 +345,10 @@ class AzureFreeIPASync:
                 correct_mail = freeipa_attrs.get('mail', '')
                 if freeipa_domain and correct_mail:
                     mail_field = existing_user.get('mail', [])
-                    current_mail = (mail_field[0] if isinstance(mail_field, list) else mail_field) or ''
+                    if isinstance(mail_field, list):
+                        current_mail = mail_field[0] if mail_field else ''
+                    else:
+                        current_mail = mail_field or ''
                     if current_mail.lower().endswith(f'@{freeipa_domain}') and current_mail != correct_mail:
                         self.logger.info(f"Fixing legacy FreeIPA-domain email for {uid}: {current_mail} -> {correct_mail}")
                         try:
