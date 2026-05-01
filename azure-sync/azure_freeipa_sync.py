@@ -309,10 +309,10 @@ class AzureFreeIPASync:
             # Fall back to UPN for users without an email license.
             azure_mail = azure_user.get('mail')
             if azure_mail:
-                freeipa_attrs['mail'] = azure_mail
-                self.logger.debug(f"Using Azure mail for {upn}: {azure_mail}")
+                freeipa_attrs['mail'] = azure_mail.lower()
+                self.logger.debug(f"Using Azure mail for {upn}: {freeipa_attrs['mail']}")
             else:
-                freeipa_attrs['mail'] = upn
+                freeipa_attrs['mail'] = upn.lower()
                 self.logger.debug(f"No email license for {upn}, using UPN as mail")
         
         # Map configured attributes
