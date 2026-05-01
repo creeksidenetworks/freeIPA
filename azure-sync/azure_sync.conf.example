@@ -42,6 +42,9 @@ dry_run=false
 log_level=INFO
 log_file=/var/log/azure_freeipa_sync.log
 
+# Comma-separated FreeIPA UIDs to never touch (built-in / protected accounts)
+skip_users=admin,krbtgt
+
 # Backup settings (optional)
 backup_enabled=false
 backup_directory=/var/backups/freeipa-sync

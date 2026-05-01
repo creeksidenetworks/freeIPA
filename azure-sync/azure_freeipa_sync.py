@@ -339,7 +339,15 @@ class AzureFreeIPASync:
             if not uid:
                 self.logger.error(f"No UID found for user: {azure_user.get('userPrincipalName', 'Unknown')}")
                 return False
-            
+
+            # Skip built-in or protected accounts that should never be overwritten
+            skip_users = [u.strip() for u in
+                          self.config.get('sync', 'skip_users', fallback='admin,krbtgt').split(',')
+                          if u.strip()]
+            if uid in skip_users:
+                self.logger.debug(f"Skipping protected account: {uid}")
+                return True
+
             # Check if user exists in FreeIPA
             try:
                 existing_user = self.freeipa_client.user_show(uid)
@@ -361,7 +369,15 @@ class AzureFreeIPASync:
                             self.freeipa_client.user_mod(uid, o_mail=correct_mail)
                             self.stats['users_updated'] += 1
                         except Exception as mail_err:
-                            self.logger.error(f"Failed to update mail for {uid}: {mail_err}")
+                            err_str = str(mail_err)
+                            if 'insufficient access' in err_str.lower():
+                                self.logger.warning(
+                                    f"Skipping mail update for {uid}: bind account lacks write "
+                                    f"permission to 'mail' — grant User Administrators role to "
+                                    f"the sync account, or add {uid!r} to skip_users in config")
+                            else:
+                                self.logger.error(f"Failed to update mail for {uid}: {mail_err}")
+                                self.error_details.append(('Mail update', f"{uid}: {mail_err}"))
                     else:
                         self.logger.debug(f"User {uid} email is current, no update needed")
 
