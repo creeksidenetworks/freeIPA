@@ -522,7 +522,7 @@ class AzureFreeIPASync:
             
             # Export LDAP data
             import subprocess
-            cmd = f"ipa-backup --data --logs {backup_dir}/ipa_backup_{timestamp}"
+            cmd = f"ipa-backup --data {backup_dir}/ipa_backup_{timestamp}"
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
