@@ -164,7 +164,7 @@ check_dependencies() {
     print_step "2" "Checking Dependencies"
     
     local missing_packages=()
-    
+
     # Check for Python 3
     if ! command -v python3 &>/dev/null; then
         missing_packages+=("python3")
@@ -172,12 +172,19 @@ check_dependencies() {
         local python_version=$(python3 --version | awk '{print $2}')
         print_ok "Python 3 installed (version $python_version)"
     fi
-    
+
     # Check for pip3
     if ! command -v pip3 &>/dev/null; then
         missing_packages+=("python3-pip")
     else
         print_ok "pip3 installed"
+    fi
+
+    # Check for ldappasswd / ldapmodify (needed for service account setup)
+    if ! command -v ldappasswd &>/dev/null; then
+        missing_packages+=("openldap-clients")
+    else
+        print_ok "openldap-clients installed"
     fi
     
     # Install missing packages
@@ -306,7 +313,7 @@ get_ipa_credentials() {
 
 # Create configuration file
 create_config_file() {
-    print_step "5" "Creating Configuration File"
+    print_step "6" "Creating Configuration File"
     
     # Create install directory
     mkdir -p "$INSTALL_DIR"
@@ -348,7 +355,7 @@ EOF
 
 # Install script files
 install_files() {
-    print_step "6" "Installing Application Files"
+    print_step "7" "Installing Application Files"
     
     # Copy Python script
     if [[ -f "$SCRIPT_DIR/azure_freeipa_sync.py" ]]; then
@@ -367,7 +374,7 @@ install_files() {
 
 # Create systemd timer for scheduled sync
 create_systemd_timer() {
-    print_step "7" "Configuring Automated Sync"
+    print_step "8" "Configuring Automated Sync"
     
     echo ""
     echo -e "${Bold}How often should the sync run?${Reset}"
@@ -437,7 +444,7 @@ EOF
 
 # Install logrotate config and tiered cleanup cron jobs
 setup_log_rotation() {
-    print_step "8" "Configuring Log Rotation"
+    print_step "9" "Configuring Log Rotation"
 
     # logrotate config: rotate hourly, dateext stamps for cleanup script
     cp "$SCRIPT_DIR/logrotate.conf" /etc/logrotate.d/azure-freeipa-sync
@@ -466,6 +473,131 @@ EOF
     print_ok "Daily log cleanup cron installed"
 
     print_info "Retention policy: hourly (24 h) -> daily (7 days) -> weekly (3 months)"
+}
+
+# Create dedicated azuresync service account with least-privilege role
+create_sync_user() {
+    print_step "5" "Creating Azure Sync Service Account"
+
+    echo ""
+    echo -n "  Create dedicated 'azuresync' service account? (Recommended) [Y/n]: "
+    read -r create_svc
+    if [[ "${create_svc,,}" == "n" ]]; then
+        print_info "Skipping — current admin credentials will be used"
+        return
+    fi
+
+    local ipa_domain_dc="dc=${IPA_DOMAIN//./,dc=}"
+    local azuresync_dn="uid=azuresync,cn=users,cn=accounts,${ipa_domain_dc}"
+
+    # Generate a secure random password
+    local azuresync_password
+    azuresync_password=$(python3 -c "
+import secrets, string
+chars = string.ascii_letters + string.digits + '!@#\$%&*-+=_'
+print(''.join(secrets.choice(chars) for _ in range(24)))
+")
+
+    # Kinit as admin to use IPA CLI
+    if echo "$IPA_BIND_PASSWORD" | kinit admin &>/dev/null; then
+        print_ok "Authenticated as admin (Kerberos)"
+    else
+        print_warn "Could not obtain Kerberos ticket as admin — skipping service account creation"
+        return
+    fi
+
+    # Ensure DM password is available for ldappasswd (bypasses temp-password flag)
+    if [[ -z "$IPA_DM_PASSWORD" ]]; then
+        echo ""
+        echo -n "  Directory Manager password (needed to set non-expiring password): "
+        read -rs IPA_DM_PASSWORD
+        echo
+    fi
+
+    # Create or update azuresync user
+    if ipa user-show azuresync &>/dev/null 2>&1; then
+        print_warn "User 'azuresync' already exists"
+        echo -n "  Reset password? [y/N]: "
+        read -r reset_pw
+        if [[ "${reset_pw,,}" != "y" ]]; then
+            echo -n "  Enter existing azuresync password: "
+            read -rs azuresync_password
+            echo
+            IPA_BIND_DN="$azuresync_dn"
+            IPA_BIND_PASSWORD="$azuresync_password"
+            kdestroy &>/dev/null || true
+            return
+        fi
+    else
+        if ipa user-add azuresync \
+                --first=Azure --last=Sync \
+                --shell=/sbin/nologin \
+                &>/dev/null 2>&1; then
+            print_ok "Created IPA user 'azuresync'"
+        else
+            print_error "Failed to create 'azuresync' — check IPA admin credentials"
+            kdestroy &>/dev/null || true
+            return
+        fi
+    fi
+
+    # Set password via Directory Manager to bypass the temp-password-must-change flag
+    if [[ -n "$IPA_DM_PASSWORD" ]]; then
+        LDAPTLS_CACERT=/etc/ipa/ca.crt \
+        ldappasswd -H ldaps://"$IPA_SERVER" -x \
+            -D "cn=Directory Manager" -w "$IPA_DM_PASSWORD" \
+            -s "$azuresync_password" \
+            "$azuresync_dn" &>/dev/null \
+        && print_ok "Password set"
+
+        # Disable password expiration (set to year 2099 = effectively never)
+        LDAPTLS_CACERT=/etc/ipa/ca.crt \
+        ldapmodify -H ldaps://"$IPA_SERVER" -x \
+            -D "cn=Directory Manager" -w "$IPA_DM_PASSWORD" &>/dev/null <<LDIF
+dn: $azuresync_dn
+changetype: modify
+replace: krbPasswordExpiration
+krbPasswordExpiration: 20991231235959Z
+LDIF
+        print_ok "Password expiration disabled (set to 2099-12-31)"
+    else
+        print_warn "Directory Manager password not available — password expiration not disabled"
+        print_info "Run manually: ipa user-mod azuresync --setattr krbPasswordExpiration=20991231235959Z"
+    fi
+
+    # Create the sync role (idempotent)
+    if ! ipa role-show "Azure Sync Role" &>/dev/null 2>&1; then
+        ipa role-add "Azure Sync Role" \
+            --desc="Least-privilege role for Azure Entra ID to FreeIPA sync" \
+            &>/dev/null
+        print_ok "Created 'Azure Sync Role'"
+    else
+        print_info "Role 'Azure Sync Role' already exists"
+    fi
+
+    # Assign required privileges (errors ignored if already assigned)
+    ipa role-add-privilege "Azure Sync Role" \
+        --privileges="User Administrators" &>/dev/null || true
+    ipa role-add-privilege "Azure Sync Role" \
+        --privileges="Group Administrators" &>/dev/null || true
+    print_ok "Privileges: User Administrators, Group Administrators"
+
+    # Assign azuresync to the role
+    ipa role-add-member "Azure Sync Role" --users=azuresync &>/dev/null || true
+    print_ok "Assigned azuresync to 'Azure Sync Role'"
+
+    kdestroy &>/dev/null || true
+
+    # Update bind credentials so create_config_file() writes azuresync details
+    IPA_BIND_DN="$azuresync_dn"
+    IPA_BIND_PASSWORD="$azuresync_password"
+
+    # Log generated credentials securely for admin reference
+    local pw_log="/var/log/azuresync_setup.log"
+    printf '%s | azuresync | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$azuresync_password" \
+        >> "$pw_log"
+    chmod 600 "$pw_log"
+    print_ok "Credentials logged to $pw_log (root read-only)"
 }
 
 # Show usage instructions
@@ -516,6 +648,7 @@ main() {
     check_dependencies
     get_azure_config
     get_ipa_credentials
+    create_sync_user
     create_config_file
     install_files
     create_systemd_timer
