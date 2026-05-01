@@ -180,12 +180,6 @@ check_dependencies() {
         print_ok "pip3 installed"
     fi
 
-    # Check for ldappasswd / ldapmodify (needed for service account setup)
-    if ! command -v ldappasswd &>/dev/null; then
-        missing_packages+=("openldap-clients")
-    else
-        print_ok "openldap-clients installed"
-    fi
     
     # Install missing packages
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
@@ -561,14 +555,6 @@ print(''.join(secrets.choice(chars) for _ in range(24)))
         return
     fi
 
-    # Ensure DM password is available for ldappasswd (bypasses temp-password flag)
-    if [[ -z "$IPA_DM_PASSWORD" ]]; then
-        echo ""
-        echo -n "  Directory Manager password (needed to set non-expiring password): "
-        read -rs IPA_DM_PASSWORD
-        echo
-    fi
-
     # Create or update azuresync user
     if ipa user-show azuresync &>/dev/null 2>&1; then
         print_warn "User 'azuresync' already exists"
@@ -596,28 +582,33 @@ print(''.join(secrets.choice(chars) for _ in range(24)))
         fi
     fi
 
-    # Set password via Directory Manager to bypass the temp-password-must-change flag
-    if [[ -n "$IPA_DM_PASSWORD" ]]; then
-        LDAPTLS_CACERT=/etc/ipa/ca.crt \
-        ldappasswd -H ldaps://"$IPA_SERVER" -x \
-            -D "cn=Directory Manager" -w "$IPA_DM_PASSWORD" \
-            -s "$azuresync_password" \
-            "$azuresync_dn" &>/dev/null \
-        && print_ok "Password set"
-
-        # Disable password expiration (set to year 2099 = effectively never)
-        LDAPTLS_CACERT=/etc/ipa/ca.crt \
-        ldapmodify -H ldaps://"$IPA_SERVER" -x \
-            -D "cn=Directory Manager" -w "$IPA_DM_PASSWORD" &>/dev/null <<LDIF
-dn: $azuresync_dn
-changetype: modify
-replace: krbPasswordExpiration
-krbPasswordExpiration: 20991231235959Z
-LDIF
+    # Set password and disable expiration via FreeIPA JSON API.
+    # Using user_mod (same as the sync script) properly updates the Kerberos
+    # principal key and krbLastPwdChange, then the second call clears the
+    # admin-reset "must change on first login" flag by pushing expiration to 2099.
+    # Credentials are passed via environment to avoid shell-quoting issues.
+    if AZURESYNC_PW="$azuresync_password" \
+       IPA_HOST="$IPA_SERVER" \
+       IPA_ADMIN_PW="$IPA_BIND_PASSWORD" \
+       python3 <<'PYEOF'
+import os, sys
+sys.path.insert(0, '/usr/lib64/python3.9/site-packages')
+sys.path.insert(0, '/usr/lib/python3.9/site-packages')
+from python_freeipa import ClientMeta
+try:
+    client = ClientMeta(os.environ['IPA_HOST'], verify_ssl=False)
+    client.login('admin', os.environ['IPA_ADMIN_PW'])
+    client.user_mod('azuresync', o_userpassword=os.environ['AZURESYNC_PW'])
+    client.user_mod('azuresync', o_krbpasswordexpiration='20991231235959Z')
+except Exception as e:
+    print(f'ERROR: {e}', file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    then
+        print_ok "Password set (Kerberos keys updated)"
         print_ok "Password expiration disabled (set to 2099-12-31)"
     else
-        print_warn "Directory Manager password not available — password expiration not disabled"
-        print_info "Run manually: ipa user-mod azuresync --setattr krbPasswordExpiration=20991231235959Z"
+        print_warn "Could not set password via FreeIPA API — set it manually after install"
     fi
 
     # Create the sync role (idempotent)
