@@ -299,7 +299,15 @@ class AzureFreeIPASync:
         upn = azure_user.get('userPrincipalName', '')
         if upn:
             freeipa_attrs['uid'] = upn.split('@')[0]  # Use username part only
-            freeipa_attrs['mail'] = upn
+            # Prefer the Azure mail attribute (assigned when user has an email license).
+            # Fall back to UPN for users without an email license.
+            azure_mail = azure_user.get('mail')
+            if azure_mail:
+                freeipa_attrs['mail'] = azure_mail
+                self.logger.debug(f"Using Azure mail for {upn}: {azure_mail}")
+            else:
+                freeipa_attrs['mail'] = upn
+                self.logger.debug(f"No email license for {upn}, using UPN as mail")
         
         # Map configured attributes
         for azure_attr, freeipa_attr in mapping_section.items():
