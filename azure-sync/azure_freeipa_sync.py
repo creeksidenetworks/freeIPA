@@ -348,7 +348,9 @@ class AzureFreeIPASync:
                 # addresses, stale UPNs, manually-set values, or any other mismatch.
                 correct_mail = freeipa_attrs.get('mail', '')
                 if correct_mail:
-                    mail_field = existing_user.get('mail', [])
+                    # user_show returns {'result': {attrs}, 'value': ..., 'summary': ...}
+                    user_attrs = existing_user.get('result', existing_user)
+                    mail_field = user_attrs.get('mail', [])
                     if isinstance(mail_field, list):
                         current_mail = mail_field[0] if mail_field else ''
                     else:
