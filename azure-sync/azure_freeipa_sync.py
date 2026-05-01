@@ -337,9 +337,25 @@ class AzureFreeIPASync:
             # Check if user exists in FreeIPA
             try:
                 existing_user = self.freeipa_client.user_show(uid)
-                # User exists, skip updates but continue for group membership
-                self.logger.info(f"User {uid} already exists, skipping user updates")
-                
+
+                # Repair legacy emails: previous sync versions set mail to uid@freeipa_domain
+                # for users without an email license. Replace those with the correct value
+                # (Azure mail attribute if licensed, otherwise Azure UPN).
+                freeipa_domain = self.config.get('freeipa', 'domain', fallback='').strip('"').lower()
+                correct_mail = freeipa_attrs.get('mail', '')
+                if freeipa_domain and correct_mail:
+                    mail_field = existing_user.get('mail', [])
+                    current_mail = (mail_field[0] if isinstance(mail_field, list) else mail_field) or ''
+                    if current_mail.lower().endswith(f'@{freeipa_domain}') and current_mail != correct_mail:
+                        self.logger.info(f"Fixing legacy FreeIPA-domain email for {uid}: {current_mail} -> {correct_mail}")
+                        try:
+                            self.freeipa_client.user_mod(uid, o_mail=correct_mail)
+                            self.stats['users_updated'] += 1
+                        except Exception as mail_err:
+                            self.logger.error(f"Failed to update mail for {uid}: {mail_err}")
+                    else:
+                        self.logger.info(f"User {uid} already exists, skipping user updates")
+
                 return True
                 
             except Exception as e:
